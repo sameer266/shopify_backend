@@ -56,7 +56,7 @@
 
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-10">
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 mb-10">
         <div class="bg-white border border-gray-200 p-6">
             <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Total Orders</p>
             <p class="text-3xl font-light text-black">{{ number_format($metrics['total_orders']) }}</p>
@@ -71,6 +71,12 @@
             <p class="text-3xl font-light text-black">{{ number_format($metrics['total_gross_sales'], 2) }}</p>
             <p class="text-xs text-gray-400 mt-1">NPR</p>
         </div>
+        <div class="bg-white border border-gray-200 p-6">
+            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Returns</p>
+            <p class="text-3xl font-light text-black">{{ number_format($metrics['returns'], 2) }}</p>
+            <p class="text-xs text-gray-400 mt-1">NPR</p>
+        </div>
+     
         <div class="bg-white border border-gray-200 p-6">
             <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Returning Customer</p>
             <p class="text-3xl font-light text-black">{{ number_format($metrics['returning_customers']) }}</p>
@@ -174,7 +180,7 @@
         </div>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10">
         <div class="bg-white border border-gray-200 p-8">
             <h2 class="text-sm uppercase tracking-wider text-gray-500 mb-6">Most Sold Products</h2>
             @if(!$mostSoldProducts)
@@ -200,6 +206,24 @@
                         <li class="flex justify-between items-center pb-3 border-b border-gray-100 last:border-0">
                             <span class="text-gray-700 truncate max-w-[200px]">{{ $p['title'] }}</span>
                             <span class="text-black font-medium">{{ $p['revenue'] }}</span>
+                        </li>
+                    @endforeach
+                </ul>
+            @endif
+        </div>
+        <div class="bg-white border border-gray-200 p-8">
+            <h2 class="text-sm uppercase tracking-wider text-gray-500 mb-6">Most Refunded</h2>
+            @if($mostRefundedProducts->isEmpty())
+                <x-empty-state title="No refunds yet" />
+            @else
+                <ul class="space-y-3 text-sm">
+                    @foreach($mostRefundedProducts as $p)
+                        <li class="flex justify-between items-center pb-3 border-b border-gray-100 last:border-0">
+                            <span class="text-gray-700 truncate max-w-[200px]">{{ $p['title'] }}</span>
+                            <div class="text-right">
+                                <span class="block text-red-600 font-medium">-{{ number_format($p['amount'], 2) }}</span>
+                                <span class="text-gray-400 text-xs">Qty: {{ $p['quantity'] }}</span>
+                            </div>
                         </li>
                     @endforeach
                 </ul>

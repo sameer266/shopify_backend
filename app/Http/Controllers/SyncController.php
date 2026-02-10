@@ -14,238 +14,457 @@ use App\Models\Product;
 
 class SyncController extends Controller
 {
+    private string $shopifyDomain;
+    private string $accessToken;
+    private string $apiVersion;
+
+    public function __construct()
+    {
+        $this->shopifyDomain = env('SHOPIFY_STORE_DOMAIN', '');
+        $this->accessToken = env('SHOPIFY_ACCESS_TOKEN', '');
+        $this->apiVersion = env('SHOPIFY_API_VERSION', '2026-01');
+    }
+
     /**
-     * MANUAL FULL SYNC
-     * Deletes all old data → inserts fresh Shopify data
+     * Main sync method - fetches all orders from Shopify and saves them locally
      */
     public function syncOrders(Request $request)
     {
-        $domain = env('SHOPIFY_STORE_DOMAIN');
-        $token  = env('SHOPIFY_ACCESS_TOKEN');
-        $apiVer = env('SHOPIFY_API_VERSION', '2026-01');
-
-
-        if (!$domain || !$token) {
-            return back()->with('error', 'Shopify config missing');
+        // Validate Shopify credentials
+        if (!$this->shopifyDomain || !$this->accessToken) {
+            return back()->with('error', 'Shopify configuration is missing');
         }
 
         try {
-
-            /**  FULL RESET (ONLY FOR MANUAL SYNC) */
-            if (filter_var(env('SHOPIFY_FULL_SYNC', true), FILTER_VALIDATE_BOOLEAN)) {
-                $this->wipeAllOrders();
+            // Optionally wipe all existing data before syncing
+            if ($this->shouldPerformFullReset()) {
+                $this->deleteAllExistingData();
             }
 
+            // Fetch and sync all orders from Shopify
+            $totalSynced = $this->fetchAllOrdersFromShopify();
 
-            $url     = "https://{$domain}/admin/api/{$apiVer}/orders.json";
-            $sinceId = null;
-            $synced  = 0;
-
-            do {
-                $query = [
-                   'limit'=>250,
-                   
-                ];
-
-                if ($sinceId) {
-                    $query['since_id'] = $sinceId;
-                }
-
-                $res = Http::withHeaders([
-                    'X-Shopify-Access-Token' => $token,
-                ])->get($url, $query);
-
-                if (!$res->successful()) {
-                    throw new \Exception('Shopify API failed');
-                }
-
-                $orders = $res->json('orders', []);
-
-                foreach ($orders as $orderData) {
-                    $this->replaceOrder($orderData);
-                    $synced++;
-                }
-
-                if (!empty($orders)) {
-                    $sinceId = (string) end($orders)['id'];
-                }
-            } while (count($orders) === 250);
-
+            // Update last sync timestamp
             Cache::put('shopify_last_sync_at', now(), now()->addYear());
 
-            return back()->with('success', "Synced {$synced} orders");
-        } catch (\Throwable $e) {
-            Log::error('Order sync failed', ['error' => $e->getMessage()]);
-            return back()->with('error', $e->getMessage());
+            return back()->with('success', "Successfully synced {$totalSynced} orders");
+
+        } catch (\Throwable $exception) {
+            Log::error('Order sync failed', [
+                'error' => $exception->getMessage(),
+                'trace' => $exception->getTraceAsString()
+            ]);
+            
+            return back()->with('error', 'Sync failed: ' . $exception->getMessage());
         }
     }
 
     /**
-     * FULL DATABASE WIPE (FK SAFE)
+     * Check if we should perform a full database reset
      */
-    private function wipeAllOrders(): void
+    private function shouldPerformFullReset(): bool
+    {
+        return filter_var(env('SHOPIFY_FULL_SYNC', true), FILTER_VALIDATE_BOOLEAN);
+    }
+
+    /**
+     * Fetch all orders from Shopify API using pagination
+     */
+    private function fetchAllOrdersFromShopify(): int
+    {
+        $baseUrl = "https://{$this->shopifyDomain}/admin/api/{$this->apiVersion}/orders.json";
+        $lastOrderId = null;
+        $totalSynced = 0;
+
+        do {
+            // Build query parameters
+            $queryParams = [
+                'limit' => 250,
+                'status' => 'any',
+            ];
+
+            if ($lastOrderId) {
+                $queryParams['since_id'] = $lastOrderId;
+            }
+
+            // Fetch batch of orders
+            $response = $this->makeShopifyRequest($baseUrl, $queryParams);
+            $orders = $response['orders'] ?? [];
+            
+            Log::info('Fetched orders from Shopify', ['count' => count($orders)]);
+
+            // Process each order
+            foreach ($orders as $orderData) {
+                $this->saveOrder($orderData);
+                $totalSynced++;
+            }
+
+            // Get last order ID for pagination
+            if (!empty($orders)) {
+                $lastOrder = end($orders);
+                $lastOrderId = (string) $lastOrder['id'];
+            }
+
+        } while (count($orders) === 250); // Continue if we got a full page
+
+        return $totalSynced;
+    }
+
+    /**
+     * Make a request to Shopify API
+     */
+    private function makeShopifyRequest(string $url, array $params = []): array
+    {
+        $response = Http::withHeaders([
+            'X-Shopify-Access-Token' => $this->accessToken,
+        ])->get($url, $params);
+
+        if (!$response->successful()) {
+            throw new \Exception('Shopify API request failed: ' . $response->body());
+        }
+
+        return $response->json();
+    }
+
+    /**
+     * Delete all existing order data from database
+     * Uses transaction and disables foreign key checks for safety
+     */
+    private function deleteAllExistingData(): void
     {
         DB::statement('SET FOREIGN_KEY_CHECKS=0');
 
         DB::table('payments')->truncate();
         DB::table('fulfillments')->truncate();
+        DB::table('refund_items')->truncate();
+        DB::table('refunds')->truncate();
         DB::table('order_items')->truncate();
         DB::table('orders')->truncate();
         DB::table('customers')->truncate();
 
         DB::statement('SET FOREIGN_KEY_CHECKS=1');
+
+        Log::info('All order data wiped from database');
     }
 
     /**
-     * DELETE OLD ORDER → INSERT NEW VERSION
-     * Used by BOTH sync + webhook
+     * Save or update an order in the database
+     * Replaces existing order if it exists
      */
-    public function replaceOrder(array $p): void
+    public function saveOrder(array $orderData): void
     {
-        $shopifyOrderId = (string) ($p['id'] ?? '');
-        if ($shopifyOrderId === '') return;
+        $shopifyOrderId = (string) ($orderData['id'] ?? '');
+        
+        if (empty($shopifyOrderId)) {
+            Log::warning('Skipping order with no ID');
+            return;
+        }
 
-        DB::transaction(function () use ($p, $shopifyOrderId) {
+        DB::transaction(function () use ($orderData, $shopifyOrderId) {
+            // Remove old version of this order
+            $this->deleteExistingOrder($shopifyOrderId);
 
-            /**  Delete old order completely */
-            if ($old = Order::where('shopify_order_id', $shopifyOrderId)->first()) {
-                $old->orderItems()->delete();
-                $old->fulfillments()->delete();
-                $old->payments()->delete();
-                $old->delete();
-            }
+            // Create or update customer
+            $customerId = $this->saveCustomer($orderData['customer'] ?? null);
 
-            /**  Customer */
-            $customerId = null;
-            if (!empty($p['customer'])) {
-                $c = $p['customer'];
+            // Create the order
+            $order = $this->createOrder($orderData, $customerId, $shopifyOrderId);
 
-                $customer = Customer::firstOrCreate(
-                    ['shopify_customer_id' => (string) $c['id']],
-                    [
-                        'email'      => $c['email'] ?? null,
-                        'first_name' => $c['first_name'] ?? null,
-                        'last_name'  => $c['last_name'] ?? null,
-                        'phone'      => $c['phone'] ?? null,
-                    ]
-                );
+            // Add related data
+            $this->saveOrderItems($order, $orderData['line_items'] ?? []);
+            $this->saveFulfillments($order, $orderData['fulfillments'] ?? []);
+            $this->savePayments($order, $shopifyOrderId);
+            $this->saveRefunds($order, $orderData['refunds'] ?? []);
 
-                $customerId = $customer->id;
-            }
-
-            /**  Order */
-            $order = Order::create([
-                'shopify_order_id'   => $shopifyOrderId,
-                'order_number'       => $p['order_number'] ?? null,
-                'customer_id'        => $customerId,
-                'email'              => $p['email'] ?? null,
-                'financial_status'   => $p['financial_status'] ?? null,
-                'fulfillment_status' => $p['fulfillment_status'] ?? null,
-                'shipping_status'    => $p['fulfillment_status'] ?? null,
-                'is_paid'            => ($p['financial_status'] ?? '') === 'paid',
-                'total_price'        => (float) ($p['total_price'] ?? 0),
-                'subtotal_price'     => (float) ($p['subtotal_price'] ?? 0),
-                'total_tax'          => (float) ($p['total_tax'] ?? 0),
-                'currency'           => $p['currency'] ?? 'NPR',
-                'processed_at'       => $p['processed_at'] ?? null,
-                'closed_at'          => $p['closed_at'] ?? null,
-                'cancelled_at'       => $p['cancelled_at'] ?? null,
-                'cancel_reason'      => $p['cancel_reason'] ?? null,
-                'shipping_address'   => $p['shipping_address'] ?? null,
-                'billing_address'    => $p['billing_address'] ?? null,
-                'note'               => $p['note'] ?? null,
-            ]);
-
-
-            /**  Line Items + Products */
-            foreach ($p['line_items'] ?? [] as $item) {
-
-                $productId = null;
-
-                if (!empty($item['product_id'])) {
-
-                    // Prepare data for firstOrCreate/update
-                    $productData = [
-                        'title'        => $item['title'] ?? 'Unknown',
-    
-                        'vendor'       => $item['vendor'] ?? null,
-
-                     
-                    ];
-
-                    // Save product (firstOrCreate on Shopify product ID)
-                    $product = Product::updateOrCreate(
-                        ['shopify_product_id' => (string) $item['product_id']],
-                        $productData
-                    );
-
-                    $productId = $product->id;
-                }
-
-                // Create order item
-                $order->orderItems()->create([
-                    'shopify_line_item_id' => (string) $item['id'],
-                    'product_id'           => $productId,
-                    'title'                => $item['title'] ?? '',
-                    'sku'                  => $item['sku'] ?? null,
-                    'quantity'             => (int) $item['quantity'],
-                    'price'                => (float) $item['price'],
-                    'total'                => (float) $item['price'] * (int) $item['quantity'],
-                ]);
-            }
-
-
-            /** Fulfillments */
-            foreach ($p['fulfillments'] ?? [] as $f) {
-                $order->fulfillments()->create([
-                    'shopify_fulfillment_id' => (string) $f['id'],
-                    'status'                 => $f['status'] ?? null,
-                    'tracking_number'        => $f['tracking_number'] ?? null,
-                ]);
-            }
-
-            /**  Customer Payments (NO REFUNDS) */
-            $this->syncCustomerPayments($order, $shopifyOrderId);
+            // Update order totals
+            $this->updateOrderTotals($order, $orderData);
         });
     }
 
-
-    private function syncCustomerPayments(Order $order, string $shopifyOrderId): void
+    /**
+     * Delete an existing order and all its related data
+     */
+    private function deleteExistingOrder(string $shopifyOrderId): void
     {
-        $domain = env('SHOPIFY_STORE_DOMAIN');
-        $token  = env('SHOPIFY_ACCESS_TOKEN');
+        $existingOrder = Order::where('shopify_order_id', $shopifyOrderId)->first();
 
-        $url = "https://{$domain}/admin/api/2026-01/orders/{$shopifyOrderId}/transactions.json";
+        if ($existingOrder) {
+            $existingOrder->orderItems()->delete();
+            $existingOrder->fulfillments()->delete();
+            $existingOrder->payments()->delete();
+            $existingOrder->refunds()->each(function ($refund) {
+                $refund->refundItems()->delete();
+                $refund->delete();
+            });
+            $existingOrder->delete();
+        }
+    }
 
-        $res = Http::withHeaders([
-            'X-Shopify-Access-Token' => $token,
-        ])->get($url);
+    /**
+     * Create or update customer record
+     */
+    private function saveCustomer(?array $customerData): ?int
+    {
+        if (empty($customerData)) {
+            return null;
+        }
 
-        if (!$res->successful()) return;
+        $customer = Customer::firstOrCreate(
+            ['shopify_customer_id' => (string) $customerData['id']],
+            [
+                'email' => $customerData['email'] ?? null,
+                'first_name' => $customerData['first_name'] ?? null,
+                'last_name' => $customerData['last_name'] ?? null,
+                'phone' => $customerData['phone'] ?? null,
+            ]
+        );
 
-        $transactions = $res->json()['transactions'] ?? [];
+        return $customer->id;
+    }
 
-        foreach ($transactions as $txn) {
+    /**
+     * Create the order record
+     */
+    private function createOrder(array $orderData, ?int $customerId, string $shopifyOrderId): Order
+    {
+        return Order::create([
+            'shopify_order_id' => $shopifyOrderId,
+            'order_number' => $orderData['order_number'] ?? null,
+            'customer_id' => $customerId,
+            'email' => $orderData['email'] ?? null,
+            'financial_status' => $orderData['financial_status'] ?? null,
+            'fulfillment_status' => $orderData['fulfillment_status'] ?? null,
+            'shipping_status' => $orderData['fulfillment_status'] ?? null,
+            'is_paid' => ($orderData['financial_status'] ?? '') === 'paid',
+            'total_price' => (float) ($orderData['total_price'] ?? 0),
+            'subtotal_price' => (float) ($orderData['subtotal_price'] ?? 0),
+            'total_tax' => (float) ($orderData['total_tax'] ?? 0),
+            'currency' => $orderData['currency'] ?? 'NPR',
+            'processed_at' => $orderData['processed_at'] ?? null,
+            'closed_at' => $orderData['closed_at'] ?? null,
+            'cancelled_at' => $orderData['cancelled_at'] ?? null,
+            'cancel_reason' => $orderData['cancel_reason'] ?? null,
+            'shipping_address' => $orderData['shipping_address'] ?? null,
+            'billing_address' => $orderData['billing_address'] ?? null,
+            'note' => $orderData['note'] ?? null,
+        ]);
+    }
 
-            // ONLY customer payments
-            if (!in_array($txn['kind'], ['sale', 'capture', 'authorization'])) {
-                continue;
-            }
+    /**
+     * Save order line items and their products
+     */
+private function saveOrderItems(Order $order, array $lineItems): void
+{
+    foreach ($lineItems as $item) {
+        $productId = null;
 
-            if (($txn['status'] ?? '') !== 'success') {
-                continue;
-            }
+        if (!empty($item['product_id'])) {
+            $productId = $this->saveProduct($item);
+        }
 
-            $order->payments()->create([
-                'shopify_payment_id' => (string) $txn['id'],
-                'gateway'            => $txn['gateway'] ?? null,
-                'kind'               => $txn['kind'],
-                'amount'             => (float) $txn['amount'],
-                'status'             => $txn['status'],
-                'processed_at'       => $txn['processed_at'] ?? null,
-                'currency'           => $txn['currency'] ?? $order->currency ?? 'NPR',
-                'details'            => json_encode($txn),
+        // Calculate tax for this line item
+        $taxAmount = collect($item['tax_lines'] ?? [])
+            ->sum(fn($tax) => (float)($tax['price'] ?? 0));
+
+        $quantity = (int) ($item['quantity'] ?? 0);
+        $price = (float) ($item['price'] ?? 0);
+
+        $order->orderItems()->create([
+            'shopify_line_item_id' => (string) $item['id'],
+            'product_id' => $productId,
+            'title' => $item['title'] ?? 'Unknown Product',
+            'sku' => $item['sku'] ?? null,
+            'quantity' => $quantity,
+            'price' => $price,
+            'total' => $price * $quantity + $taxAmount, // include tax
+        ]);
+    }
+}
+
+
+    /**
+     * Create or update a product
+     */
+    private function saveProduct(array $itemData): int
+    {
+        $product = Product::updateOrCreate(
+            ['shopify_product_id' => (string) $itemData['product_id']],
+            [
+                'title' => $itemData['title'] ?? 'Unknown',
+                'vendor' => $itemData['vendor'] ?? null,
+            ]
+        );
+
+        return $product->id;
+    }
+
+    /**
+     * Save order fulfillments
+     */
+    private function saveFulfillments(Order $order, array $fulfillments): void
+    {
+        foreach ($fulfillments as $fulfillment) {
+            $order->fulfillments()->create([
+                'shopify_fulfillment_id' => (string) $fulfillment['id'],
+                'status' => $fulfillment['status'] ?? null,
+                'tracking_number' => $fulfillment['tracking_number'] ?? null,
             ]);
         }
     }
+
+    /**
+     * Fetch and save payment transactions for an order
+     */
+    private function savePayments(Order $order, string $shopifyOrderId): void
+    {
+        $url = "https://{$this->shopifyDomain}/admin/api/{$this->apiVersion}/orders/{$shopifyOrderId}/transactions.json";
+
+        try {
+            $response = $this->makeShopifyRequest($url);
+            $transactions = $response['transactions'] ?? [];
+
+            foreach ($transactions as $transaction) {
+                // Only save successful customer payment transactions
+                if (!$this->isCustomerPayment($transaction)) {
+                    continue;
+                }
+
+                $order->payments()->create([
+                    'shopify_payment_id' => (string) $transaction['id'],
+                    'gateway' => $transaction['gateway'] ?? null,
+                    'kind' => $transaction['kind'],
+                    'amount' => (float) $transaction['amount'],
+                    'status' => $transaction['status'],
+                    'processed_at' => $transaction['processed_at'] ?? null,
+                    'currency' => $transaction['currency'] ?? $order->currency ?? 'NPR',
+                    'details' => json_encode($transaction),
+                ]);
+            }
+        } catch (\Exception $e) {
+            Log::warning('Failed to fetch payment transactions', [
+                'order_id' => $shopifyOrderId,
+                'error' => $e->getMessage()
+            ]);
+        }
+    }
+
+    /**
+     * Check if transaction is a customer payment (not a refund)
+     */
+    private function isCustomerPayment(array $transaction): bool
+    {
+        $validKinds = ['sale', 'capture', 'authorization'];
+        $kind = $transaction['kind'] ?? '';
+        $status = $transaction['status'] ?? '';
+
+        return in_array($kind, $validKinds) && $status === 'success';
+    }
+
+    /**
+     * Save refunds and refund line items
+     */
+    private function saveRefunds(Order $order, array $refunds): void
+    {
+        foreach ($refunds as $refundData) {
+            $refund = $order->refunds()->updateOrCreate(
+                ['shopify_refund_id' => (string) $refundData['id']],
+                [
+                    'processed_at' => $refundData['processed_at'] ?? null,
+                    'note' => $refundData['note'] ?? null,
+                    'gateway' => $order->payments()->first()?->gateway,
+                    'transactions' => $refundData['transactions'] ?? [],
+                ]
+            );
+
+            // Save refund line items
+            $this->saveRefundItems($refund, $order, $refundData['refund_line_items'] ?? []);
+
+            // Calculate refund totals from transactions
+            $this->updateRefundTotals($refund, $refundData);
+        }
+    }
+
+    /**
+     * Save individual refund line items
+     */
+    private function saveRefundItems($refund, Order $order, array $refundLineItems): void
+    {
+        foreach ($refundLineItems as $refundItem) {
+            // Find the original order item
+            $lineItemId = (string) ($refundItem['line_item_id'] ?? '');
+            $orderItem = $order->orderItems()
+                ->where('shopify_line_item_id', $lineItemId)
+                ->first();
+
+            $refund->refundItems()->updateOrCreate(
+                ['shopify_line_item_id' => (string) ($refundItem['id'] ?? '')],
+                [
+                    'order_item_id' => $orderItem?->id,
+                    'product_id' => $orderItem?->product_id,
+                    'quantity' => (int) ($refundItem['quantity'] ?? 0),
+                    'subtotal' => (float) ($refundItem['subtotal'] ?? 0),
+                    'total_tax' => (float) ($refundItem['total_tax'] ?? 0),
+                    'restock_type' => $refundItem['restock_type'] ?? null,
+                ]
+            );
+        }
+    }
+
+    /**
+     * Update refund totals from transaction data
+     */
+private function updateRefundTotals($refund, array $refundData): void
+{
+    $totalRefunded = 0;
+    $gateway = null;
+
+    foreach ($refundData['transactions'] ?? [] as $transaction) {
+        if (($transaction['kind'] ?? '') === 'refund' && ($transaction['status'] ?? '') === 'success') {
+            $totalRefunded += (float) ($transaction['amount'] ?? 0);
+
+            if (!$gateway && !empty($transaction['gateway'])) {
+                $gateway = $transaction['gateway'];
+            }
+        }
+    }
+
+    // Sum total tax from refund line items (cast to float)
+    $totalTax = collect($refundData['refund_line_items'] ?? [])
+        ->sum(fn($item) => (float) ($item['total_tax'] ?? 0));
+
+    $refund->update([
+        'total_amount' => $totalRefunded,
+        'total_tax' => $totalTax,
+        'gateway' => $gateway ?? $refund->gateway,
+    ]);
+}
+
+
+    /**
+     * Check if transaction is a successful refund
+     */
+    private function isSuccessfulRefundTransaction(array $transaction): bool
+    {
+        return ($transaction['kind'] ?? '') === 'refund' 
+            && ($transaction['status'] ?? '') === 'success';
+    }
+
+    /**
+     * Update order totals after all related data is saved
+     */
+  private function updateOrderTotals(Order $order, array $orderData): void
+{
+
+    $totalRefunds = $order->refunds()->sum('total_amount');
+    $totalDiscounts = (float) ($orderData['total_discounts'] ?? 0);
+ 
+
+
+    $order->update([
+        'total_refunds' => $totalRefunds,
+        'total_discounts' => $totalDiscounts,
+      
+    ]);
+}
+
 }

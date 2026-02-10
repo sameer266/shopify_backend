@@ -146,6 +146,59 @@
                 </table>
             </div>
         </div>
+
+        <!-- Refunds History -->
+        <div class="bg-white border border-gray-200 overflow-hidden rounded-lg">
+             <div class="p-4 border-b border-gray-200 bg-gray-50">
+                <h3 class="text-sm uppercase tracking-wider text-gray-500 font-medium">Refunds History</h3>
+            </div>
+            <div class="p-0">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="text-xs uppercase text-gray-500 border-b border-gray-200">
+                            <th class="px-6 py-4 font-medium">Refund ID</th>
+                            <th class="px-6 py-4 font-medium">Amount</th>
+                            <th class="px-6 py-4 font-medium">Gateway</th>
+                            <th class="px-6 py-4 font-medium text-right">Date</th>
+                        </tr>
+                    </thead>
+                    <tbody class="text-sm">
+                        @forelse($order->refunds as $refund)
+                        <tr class="border-b border-gray-100 last:border-0 hover:bg-gray-50">
+                            <td class="px-6 py-4 text-black font-mono text-xs">{{ Str::limit($refund->shopify_refund_id, 12) }}</td>
+                            <td class="px-6 py-4 text-red-600 font-medium">-{{ $order->currency }} {{ number_format($refund->total_amount, 2) }}</td>
+                            <td class="px-6 py-4 text-gray-700">{{ $refund->gateway ?? '—' }}</td>
+                            <td class="px-6 py-4 text-right text-gray-500">
+                                {{ $refund->processed_at ? $refund->processed_at->format('M j, Y g:i a') : '—' }}
+                            </td>
+                        </tr>
+                        <!-- Refund Items (nested) -->
+                        @if($refund->refundItems->isNotEmpty())
+                            <tr class="bg-gray-50">
+                                <td colspan="4" class="px-6 py-3">
+                                    <div class="text-xs text-gray-600">
+                                        <strong class="text-gray-700">Refunded Items:</strong>
+                                        <ul class="mt-2 space-y-1 ml-4">
+                                            @foreach($refund->refundItems as $item)
+                                                <li class="flex justify-between">
+                                                    <span>{{ $item->orderItem->title ?? $item->product->title ?? 'Unknown' }} (Qty: {{ $item->quantity }})</span>
+                                                    <span class="text-red-600">-Rs {{ number_format($item->subtotal, 2) }}</span>
+                                                </li>
+                                            @endforeach
+                                        </ul>
+                                    </div>
+                                </td>
+                            </tr>
+                        @endif
+                        @empty
+                        <tr>
+                            <td colspan="4" class="px-6 py-4 text-sm text-gray-500 text-center italic">No refund records found.</td>
+                        </tr>
+                        @endforelse
+                    </tbody>
+                </table>
+            </div>
+        </div>
     </div>
 
     <!-- Right Column: Customer & Summary -->
@@ -227,6 +280,12 @@
                 <span>Subtotal</span>
                 <span>Rs {{ number_format($order->subtotal_price, 2) }}</span>
             </div>
+            @if($order->total_discounts > 0)
+            <div class="flex justify-between text-gray-600">
+                <span>Discounts</span>
+                <span class="text-green-600">-Rs {{ number_format($order->total_discounts, 2) }}</span>
+            </div>
+            @endif
             <div class="flex justify-between text-gray-600">
                 <span>Tax</span>
                 <span>Rs {{ number_format($order->total_tax, 2) }}</span>
@@ -239,6 +298,16 @@
                 <span>Total</span>
                 <span>Rs {{ number_format($order->total_price, 2) }}</span>
             </div>
+            @if($order->total_refunds > 0)
+            <div class="flex justify-between text-red-600 font-medium">
+                <span>Refunded</span>
+                <span>-Rs {{ number_format($order->total_refunds, 2) }}</span>
+            </div>
+            <div class="border-t pt-2 mt-2 flex justify-between font-bold text-black text-base">
+                <span>Net Total</span>
+                <span>Rs {{ number_format($order->total_price - $order->total_refunds, 2) }}</span>
+            </div>
+            @endif
         </div>
     </div>
 

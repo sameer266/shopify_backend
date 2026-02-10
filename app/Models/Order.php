@@ -28,6 +28,8 @@ class Order extends Model
         'shipping_address',
         'billing_address',
         'note',
+        'total_discounts',
+        'total_refunds',
       
     ];
 
@@ -43,7 +45,14 @@ class Order extends Model
             'cancelled_at' => 'datetime',
             'shipping_address' => 'array',
             'billing_address' => 'array',
+            'total_discounts' => 'decimal:2',
+            'total_refunds'   => 'decimal:2',
         ];
+    }
+
+    public function refunds(): HasMany
+    {
+        return $this->hasMany(Refund::class);
     }
 
     public function customer(): BelongsTo
