@@ -28,5 +28,7 @@ Route::middleware(['check_auth'])->group(function () {
     Route::get('orders', [OrderController::class, 'index'])->name('orders.index');
     Route::get('orders/{order_id}', [OrderController::class, 'show'])->name('orders.show');
 
+    Route::get('reports', [App\Http\Controllers\ReportController::class, 'index'])->name('reports.index');
+
     Route::post('sync/orders', [SyncController::class, 'syncOrders'])->name('sync.orders');
 });

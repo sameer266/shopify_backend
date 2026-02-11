@@ -25,26 +25,30 @@ class SyncController extends Controller
         $this->apiVersion = env('SHOPIFY_API_VERSION', '2026-01');
     }
 
+    // =======================
+    // Main Sync Entry Point
+    // =======================
+    
     /**
-     * Main sync method - fetches all orders from Shopify and saves them locally
+     * Sync all orders from Shopify to local database
      */
     public function syncOrders(Request $request)
     {
-        // Validate Shopify credentials
+        // Make sure we have Shopify credentials
         if (!$this->shopifyDomain || !$this->accessToken) {
             return back()->with('error', 'Shopify configuration is missing');
         }
 
         try {
-            // Optionally wipe all existing data before syncing
+            // Wipe existing data if needed (based on .env setting)
             if ($this->shouldPerformFullReset()) {
                 $this->deleteAllExistingData();
             }
 
-            // Fetch and sync all orders from Shopify
+            // Fetch all orders from Shopify
             $totalSynced = $this->fetchAllOrdersFromShopify();
 
-            // Update last sync timestamp
+            // Remember when we last synced
             Cache::put('shopify_last_sync_at', now(), now()->addYear());
 
             return back()->with('success', "Successfully synced {$totalSynced} orders");
@@ -59,16 +63,12 @@ class SyncController extends Controller
         }
     }
 
+    // =============================
+    // Shopify API Communication
+    // =============================
+    
     /**
-     * Check if we should perform a full database reset
-     */
-    private function shouldPerformFullReset(): bool
-    {
-        return filter_var(env('SHOPIFY_FULL_SYNC', true), FILTER_VALIDATE_BOOLEAN);
-    }
-
-    /**
-     * Fetch all orders from Shopify API using pagination
+     * Fetch all orders from Shopify using pagination
      */
     private function fetchAllOrdersFromShopify(): int
     {
@@ -78,34 +78,37 @@ class SyncController extends Controller
 
         do {
             // Build query parameters
-            $queryParams = [
+            $params = [
                 'limit' => 250,
-                'status' => 'any',
+                'status' => 'any', // Get all orders regardless of status
+            
+             
             ];
 
+            // For pagination, get orders after the last one we saw
             if ($lastOrderId) {
-                $queryParams['since_id'] = $lastOrderId;
+                $params['since_id'] = $lastOrderId;
             }
 
-            // Fetch batch of orders
-            $response = $this->makeShopifyRequest($baseUrl, $queryParams);
+            // Fetch batch of orders from Shopify
+            $response = $this->makeShopifyRequest($baseUrl, $params);
             $orders = $response['orders'] ?? [];
             
             Log::info('Fetched orders from Shopify', ['count' => count($orders)]);
 
-            // Process each order
+            // Save each order to our database
             foreach ($orders as $orderData) {
                 $this->saveOrder($orderData);
                 $totalSynced++;
             }
 
-            // Get last order ID for pagination
+            // Get the last order ID for next pagination
             if (!empty($orders)) {
                 $lastOrder = end($orders);
                 $lastOrderId = (string) $lastOrder['id'];
             }
 
-        } while (count($orders) === 250); // Continue if we got a full page
+        } while (count($orders) === 250); // Keep going if we got a full page
 
         return $totalSynced;
     }
@@ -118,6 +121,7 @@ class SyncController extends Controller
         $response = Http::withHeaders([
             'X-Shopify-Access-Token' => $this->accessToken,
         ])->get($url, $params);
+        
 
         if (!$response->successful()) {
             throw new \Exception('Shopify API request failed: ' . $response->body());
@@ -126,9 +130,20 @@ class SyncController extends Controller
         return $response->json();
     }
 
+    // ========================
+    // Database Management
+    // ========================
+    
+    /**
+     * Check if we should wipe all data before syncing
+     */
+    private function shouldPerformFullReset(): bool
+    {
+        return filter_var(env('SHOPIFY_FULL_SYNC', true), FILTER_VALIDATE_BOOLEAN);
+    }
+
     /**
      * Delete all existing order data from database
-     * Uses transaction and disables foreign key checks for safety
      */
     private function deleteAllExistingData(): void
     {
@@ -147,9 +162,12 @@ class SyncController extends Controller
         Log::info('All order data wiped from database');
     }
 
+    // ===========================
+    // Save Order & Related Data
+    // ===========================
+    
     /**
      * Save or update an order in the database
-     * Replaces existing order if it exists
      */
     public function saveOrder(array $orderData): void
     {
@@ -161,28 +179,28 @@ class SyncController extends Controller
         }
 
         DB::transaction(function () use ($orderData, $shopifyOrderId) {
-            // Remove old version of this order
+            // Remove old version if it exists
             $this->deleteExistingOrder($shopifyOrderId);
 
-            // Create or update customer
+            // Save customer first
             $customerId = $this->saveCustomer($orderData['customer'] ?? null);
 
             // Create the order
             $order = $this->createOrder($orderData, $customerId, $shopifyOrderId);
 
-            // Add related data
+            // Add all the related data
             $this->saveOrderItems($order, $orderData['line_items'] ?? []);
             $this->saveFulfillments($order, $orderData['fulfillments'] ?? []);
             $this->savePayments($order, $shopifyOrderId);
             $this->saveRefunds($order, $orderData['refunds'] ?? []);
 
-            // Update order totals
+            // Update totals now that we have all the data
             $this->updateOrderTotals($order, $orderData);
         });
     }
 
     /**
-     * Delete an existing order and all its related data
+     * Delete existing order and all related data
      */
     private function deleteExistingOrder(string $shopifyOrderId): void
     {
@@ -200,6 +218,10 @@ class SyncController extends Controller
         }
     }
 
+    // ==================
+    // Save Customers
+    // ==================
+    
     /**
      * Create or update customer record
      */
@@ -222,8 +244,12 @@ class SyncController extends Controller
         return $customer->id;
     }
 
+    // ===============
+    // Save Orders
+    // ===============
+    
     /**
-     * Create the order record
+     * Create the main order record
      */
     private function createOrder(array $orderData, ?int $customerId, string $shopifyOrderId): Order
     {
@@ -237,7 +263,9 @@ class SyncController extends Controller
             'shipping_status' => $orderData['fulfillment_status'] ?? null,
             'is_paid' => ($orderData['financial_status'] ?? '') === 'paid',
             'total_price' => (float) ($orderData['total_price'] ?? 0),
-            'subtotal_price' => (float) ($orderData['subtotal_price'] ?? 0),
+            'total_discounts' => (float) ($orderData['total_discounts'] ?? 0),
+
+            'subtotal_price' => (float) ($orderData['total_line_items_price'] ?? 0),
             'total_tax' => (float) ($orderData['total_tax'] ?? 0),
             'currency' => $orderData['currency'] ?? 'NPR',
             'processed_at' => $orderData['processed_at'] ?? null,
@@ -251,37 +279,67 @@ class SyncController extends Controller
     }
 
     /**
-     * Save order line items and their products
+     * Update order totals after everything is saved
      */
-private function saveOrderItems(Order $order, array $lineItems): void
-{
-    foreach ($lineItems as $item) {
-        $productId = null;
+    private function updateOrderTotals(Order $order, array $orderData): void
+    {
+        $totalRefunds = $order->refunds()->sum('total_amount');
+      
 
-        if (!empty($item['product_id'])) {
-            $productId = $this->saveProduct($item);
-        }
-
-        // Calculate tax for this line item
-        $taxAmount = collect($item['tax_lines'] ?? [])
-            ->sum(fn($tax) => (float)($tax['price'] ?? 0));
-
-        $quantity = (int) ($item['quantity'] ?? 0);
-        $price = (float) ($item['price'] ?? 0);
-
-        $order->orderItems()->create([
-            'shopify_line_item_id' => (string) $item['id'],
-            'product_id' => $productId,
-            'title' => $item['title'] ?? 'Unknown Product',
-            'sku' => $item['sku'] ?? null,
-            'quantity' => $quantity,
-            'price' => $price,
-            'total' => $price * $quantity + $taxAmount, // include tax
+        $order->update([
+            'total_refunds' => $totalRefunds,
+          
         ]);
     }
-}
 
+    // ====================
+    // Save Order Items
+    // ====================
+    
+    /**
+     * Save order line items and their products
+     */
+    private function saveOrderItems(Order $order, array $lineItems): void
+    {
+        foreach ($lineItems as $item) {
+            $productId = null;
 
+            // Save product if we have a product ID
+            if (!empty($item['product_id'])) {
+                $productId = $this->saveProduct($item);
+            }
+
+            // Calculate tax for this line item
+            $taxAmount = collect($item['tax_lines'] ?? [])
+                ->sum(fn($tax) => (float)($tax['price'] ?? 0));
+
+            // Calculate discount for this line item
+            $discountAmount = collect($item['discount_allocations'] ?? [])
+                ->sum(fn($discount) => (float)($discount['amount'] ?? 0));
+
+            $quantity = (int) ($item['quantity'] ?? 0);
+            $price = (float) ($item['price'] ?? 0);
+
+            // Total = (Price * Quantity) - Discount + Tax
+            $total = ($price * $quantity) - $discountAmount + $taxAmount;
+
+            $order->orderItems()->create([
+                'shopify_line_item_id' => (string) $item['id'],
+                'product_id' => $productId,
+                'title' => $item['title'] ?? 'Unknown Product',
+                'sku' => $item['sku'] ?? null,
+                'quantity' => $quantity,
+                'price' => $price,
+                'total' => $total,
+                'properties' => $item['properties'] ?? [], // Pass properties array directly, cast handles it
+            ]);
+        }
+    }
+
+    // =================
+    // Save Products
+    // =================
+    
     /**
      * Create or update a product
      */
@@ -298,8 +356,12 @@ private function saveOrderItems(Order $order, array $lineItems): void
         return $product->id;
     }
 
+    // =====================
+    // Save Fulfillments
+    // =====================
+    
     /**
-     * Save order fulfillments
+     * Save order fulfillments (shipping info)
      */
     private function saveFulfillments(Order $order, array $fulfillments): void
     {
@@ -312,6 +374,10 @@ private function saveOrderItems(Order $order, array $lineItems): void
         }
     }
 
+    // =================
+    // Save Payments
+    // =================
+    
     /**
      * Fetch and save payment transactions for an order
      */
@@ -324,7 +390,7 @@ private function saveOrderItems(Order $order, array $lineItems): void
             $transactions = $response['transactions'] ?? [];
 
             foreach ($transactions as $transaction) {
-                // Only save successful customer payment transactions
+                // Only save successful customer payments
                 if (!$this->isCustomerPayment($transaction)) {
                     continue;
                 }
@@ -360,6 +426,10 @@ private function saveOrderItems(Order $order, array $lineItems): void
         return in_array($kind, $validKinds) && $status === 'success';
     }
 
+    // ================
+    // Save Refunds
+    // ================
+    
     /**
      * Save refunds and refund line items
      */
@@ -376,10 +446,10 @@ private function saveOrderItems(Order $order, array $lineItems): void
                 ]
             );
 
-            // Save refund line items
+            // Save individual refund items
             $this->saveRefundItems($refund, $order, $refundData['refund_line_items'] ?? []);
 
-            // Calculate refund totals from transactions
+            // Calculate totals from transactions
             $this->updateRefundTotals($refund, $refundData);
         }
     }
@@ -411,60 +481,32 @@ private function saveOrderItems(Order $order, array $lineItems): void
     }
 
     /**
-     * Update refund totals from transaction data
+     * Calculate and update refund totals from transaction data
      */
-private function updateRefundTotals($refund, array $refundData): void
-{
-    $totalRefunded = 0;
-    $gateway = null;
+    private function updateRefundTotals($refund, array $refundData): void
+    {
+        $totalRefunded = 0;
+        $gateway = null;
 
-    foreach ($refundData['transactions'] ?? [] as $transaction) {
-        if (($transaction['kind'] ?? '') === 'refund' && ($transaction['status'] ?? '') === 'success') {
-            $totalRefunded += (float) ($transaction['amount'] ?? 0);
+        // Sum up all successful refund transactions
+        foreach ($refundData['transactions'] ?? [] as $transaction) {
+            if (($transaction['kind'] ?? '') === 'refund' && ($transaction['status'] ?? '') === 'success') {
+                $totalRefunded += (float) ($transaction['amount'] ?? 0);
 
-            if (!$gateway && !empty($transaction['gateway'])) {
-                $gateway = $transaction['gateway'];
+                if (!$gateway && !empty($transaction['gateway'])) {
+                    $gateway = $transaction['gateway'];
+                }
             }
         }
+
+        // Calculate total tax from refund items
+        $totalTax = collect($refundData['refund_line_items'] ?? [])
+            ->sum(fn($item) => (float) ($item['total_tax'] ?? 0));
+
+        $refund->update([
+            'total_amount' => $totalRefunded,
+            'total_tax' => $totalTax,
+            'gateway' => $gateway ?? $refund->gateway,
+        ]);
     }
-
-    // Sum total tax from refund line items (cast to float)
-    $totalTax = collect($refundData['refund_line_items'] ?? [])
-        ->sum(fn($item) => (float) ($item['total_tax'] ?? 0));
-
-    $refund->update([
-        'total_amount' => $totalRefunded,
-        'total_tax' => $totalTax,
-        'gateway' => $gateway ?? $refund->gateway,
-    ]);
-}
-
-
-    /**
-     * Check if transaction is a successful refund
-     */
-    private function isSuccessfulRefundTransaction(array $transaction): bool
-    {
-        return ($transaction['kind'] ?? '') === 'refund' 
-            && ($transaction['status'] ?? '') === 'success';
-    }
-
-    /**
-     * Update order totals after all related data is saved
-     */
-  private function updateOrderTotals(Order $order, array $orderData): void
-{
-
-    $totalRefunds = $order->refunds()->sum('total_amount');
-    $totalDiscounts = (float) ($orderData['total_discounts'] ?? 0);
- 
-
-
-    $order->update([
-        'total_refunds' => $totalRefunds,
-        'total_discounts' => $totalDiscounts,
-      
-    ]);
-}
-
 }

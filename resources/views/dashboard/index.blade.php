@@ -56,35 +56,26 @@
 
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4 mb-10">
-        <div class="bg-white border border-gray-200 p-6">
-            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Total Orders</p>
-            <p class="text-3xl font-light text-black">{{ number_format($metrics['total_orders']) }}</p>
-        </div>
-        <div class="bg-white border border-gray-200 p-6">
-            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Net Sales</p>
-            <p class="text-3xl font-light text-black">{{ number_format($metrics['net_sales'], 2) }}</p>
-            <p class="text-xs text-gray-400 mt-1">NPR</p>
-        </div>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
         <div class="bg-white border border-gray-200 p-6">
             <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Gross Sales</p>
             <p class="text-3xl font-light text-black">{{ number_format($metrics['total_gross_sales'], 2) }}</p>
             <p class="text-xs text-gray-400 mt-1">NPR</p>
         </div>
+
         <div class="bg-white border border-gray-200 p-6">
-            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Returns</p>
-            <p class="text-3xl font-light text-black">{{ number_format($metrics['returns'], 2) }}</p>
+            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Net Sales</p>
+            <p class="text-3xl font-light text-black">{{ number_format($metrics['total_net_sales'], 2) }}</p>
             <p class="text-xs text-gray-400 mt-1">NPR</p>
         </div>
-     
+
         <div class="bg-white border border-gray-200 p-6">
-            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Returning Customer</p>
-            <p class="text-3xl font-light text-black">{{ number_format($metrics['returning_customers']) }}</p>
+            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Returns</p>
+            <p class="text-3xl font-light text-black">{{ number_format($metrics['total_returns'], 2) }}</p>
+            <p class="text-xs text-gray-400 mt-1">NPR</p>
         </div>
-        <div class="bg-white border border-gray-200 p-6">
-            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">New Customer (30d)</p>
-            <p class="text-3xl font-light text-black">{{ number_format($metrics['new_customers']) }}</p>
-        </div>
+
+
     </div>
 
     <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-10">

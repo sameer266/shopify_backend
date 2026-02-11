@@ -37,6 +37,12 @@
                 </ul>
             </li>
             <li>
+                <a href="{{ route('reports.index') }}" class="flex items-center gap-3 px-4 py-3 text-gray-300 hover:bg-gray-900 hover:text-white transition {{ request()->routeIs('reports.index') ? 'bg-gray-900 text-white border-l-2 border-white' : '' }}">
+                    <i class="fas fa-chart-pie w-4 text-center text-xs"></i>
+                    <span class="text-sm">Reports</span>
+                </a>
+            </li>
+            <li>
                 <a href="{{ route('dashboard') }}#sync" class="flex items-center gap-3 px-4 py-3 text-gray-300 hover:bg-gray-900 hover:text-white transition">
                     <i class="fas fa-sync-alt w-4 text-center text-xs"></i>
                     <span class="text-sm">Sync</span>
