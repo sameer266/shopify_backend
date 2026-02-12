@@ -6,6 +6,7 @@ use App\Models\Customer;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\Refund;
+use App\Models\RefundItem;
 use App\Models\Product;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -101,53 +102,39 @@ class DashboardController extends Controller
         ]);
     }
 
-    // === Calculate key business metrics ===
-
-private function calculateMetrics($startDate, $endDate): array
+  private function calculateMetrics($startDate, $endDate): array
 {
-    $allOrders = Order::whereBetween('created_at', [$startDate, $endDate]);
+    // Query orders in the date range
+    $ordersQuery = Order::whereBetween('processed_at', [$startDate, $endDate]);
 
-    $paidOrders = Order::whereBetween('created_at', [$startDate, $endDate])
-        ->whereIn('financial_status', [
-            'paid',
-            'partially_paid',
-            'partially_refunded',
-            'refunded'
-        ]);
+    // Gross sales = sum of line items before discounts
+    $grossSales = (clone $ordersQuery)->sum('subtotal_price');
 
-    // Gross Sales 
-    $grossSales = $paidOrders->sum('subtotal_price');
+    // Total discounts applied to orders
+    $totalDiscounts = (clone $ordersQuery)->sum('total_discounts');
 
-    // Discounts
-    $totalDiscounts = $paidOrders->sum('total_discounts');
-        Log::info('Total discounts calculated', [
-            'total_discounts' => $totalDiscounts,
-            'paid_orders_count' => $paidOrders->count()
-        ]);
+    // Total refunds including order adjustments
+    $totalRefunds = (clone $ordersQuery)->sum('total_refunds');
 
-    // Refunds 
-   $totalRefunds = Refund::whereBetween('created_at', [$startDate, $endDate])
-            ->with('refundItems')
-            ->get()
-            ->sum(function ($refund) {
-                return $refund->refundItems->sum('subtotal');
-            });
-
+    // Net sales = gross sales - discounts - total refunds
     $netSales = $grossSales - $totalDiscounts - $totalRefunds;
 
-    // AOV calculation
-    $averageOrderValue = $paidOrders->count() > 0
-        ? ($grossSales - $totalDiscounts) / $paidOrders->count()
+    // Orders count & average order value
+    $orderCount = (clone $ordersQuery)->count();
+    $averageOrderValue = $orderCount > 0
+        ? ($grossSales - $totalDiscounts) / $orderCount
         : 0;
 
     return [
-        'total_orders' => $allOrders->count(),
+        'total_orders' => $orderCount,
         'total_gross_sales' => round($grossSales, 2),
+        'total_discounts' => round($totalDiscounts, 2),
         'total_returns' => round($totalRefunds, 2),
         'total_net_sales' => round($netSales, 2),
         'average_order_value' => round($averageOrderValue, 2),
     ];
 }
+
 
 
     // ===== Get order insights grouped by status ===
@@ -167,7 +154,7 @@ private function calculateMetrics($startDate, $endDate): array
         return [
             'returning' => $this->getTopReturningCustomers(),
             'topSpenders' => $this->getTopCustomersBySpend($startDate, $endDate),
-            'new' => Customer::latest()->limit(10)->get()
+            'new' => $this->getNewCustomersByOrderDate($startDate, $endDate),
         ];
     }
 
@@ -183,14 +170,10 @@ private function calculateMetrics($startDate, $endDate): array
     }
 
 
-
-
-
     // ======== Group orders by a specific status column ========
-
     private function getOrdersByStatus($startDate, $endDate, $column): array
     {
-        $query = Order::whereBetween('created_at', [$startDate, $endDate]);
+        $query = Order::whereBetween('processed_at', [$startDate, $endDate]);
 
         // Handle null fulfillment_status
         if ($column === 'fulfillment_status') {
@@ -207,8 +190,7 @@ private function calculateMetrics($startDate, $endDate): array
     }
 
 
-    //' ========= Get top 10 returning customers ===========
-
+    // ========= Get top 10 returning customers ===========
     private function getTopReturningCustomers()
     {
         return Customer::withCount('orders')
@@ -218,14 +200,43 @@ private function calculateMetrics($startDate, $endDate): array
             ->get();
     }
 
+    /**
+     * Get customers whose first paid order falls within the selected date range.
+     * "New" is defined by order processed_at (Shopify order date), not customer created_at.
+     */
+    private function getNewCustomersByOrderDate($startDate, $endDate)
+    {
+        // Customers with at least one paid/partially paid/refunded order in the period
+        $customers = Customer::whereHas('orders', function ($query) use ($startDate, $endDate) {
+            $query->whereBetween('processed_at', [$startDate, $endDate])
+                ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
+        })
+            // And no paid/partially paid/refunded orders before the period start
+            ->whereDoesntHave('orders', function ($query) use ($startDate) {
+                $query->where('processed_at', '<', $startDate)
+                    ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
+            })
+            ->with(['orders' => function ($query) use ($startDate, $endDate) {
+                $query->whereBetween('processed_at', [$startDate, $endDate])
+                    ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded'])
+                    ->orderBy('processed_at');
+            }])
+            ->get();
+
+        // Sort by first order date in the range (most recent first) and limit to 10
+        return $customers->sortByDesc(function ($customer) {
+            return optional($customer->orders->first())->processed_at;
+        })
+            ->take(10)
+            ->values();
+    }
 
 
     // ======= Get top 10 customers by spend in date range ============
-
     private function getTopCustomersBySpend($startDate, $endDate)
     {
-        return Order::whereBetween('created_at', [$startDate, $endDate])
-            ->whereIn('financial_status', ['paid', 'partially_refunded', 'refunded'])
+        return Order::whereBetween('processed_at', [$startDate, $endDate])
+            ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded'])
             ->with('customer')
             ->get()
             ->groupBy('customer_id')
@@ -246,17 +257,12 @@ private function calculateMetrics($startDate, $endDate): array
     }
 
 
-
-
-
-
     // ======= Get top 10 products by quantity sold =====
-
     private function getMostSoldProducts($startDate, $endDate): array
     {
         $orderItems = OrderItem::whereHas('order', function ($query) use ($startDate, $endDate) {
-            $query->whereBetween('created_at', [$startDate, $endDate])
-                ->whereIn('financial_status', ['paid', 'partially_refunded', 'refunded']);
+            $query->whereBetween('processed_at', [$startDate, $endDate])
+                ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
         })
             ->with('product')
             ->get()
@@ -283,15 +289,12 @@ private function calculateMetrics($startDate, $endDate): array
     }
 
 
-
-
     // ======= Get top 10 products by revenue  ============
-
     private function getHighestRevenueProducts($startDate, $endDate): array
     {
         $orderItems = OrderItem::whereHas('order', function ($query) use ($startDate, $endDate) {
-            $query->whereBetween('created_at', [$startDate, $endDate])
-                ->whereIn('financial_status', ['paid', 'partially_refunded', 'refunded']);
+            $query->whereBetween('processed_at', [$startDate, $endDate])
+                ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
         })
             ->with('product')
             ->get()
@@ -318,10 +321,13 @@ private function calculateMetrics($startDate, $endDate): array
     }
 
     // ========== Get top 5 most refunded products =============
-
     private function getMostRefundedProducts($startDate, $endDate)
     {
-        $refunds = Refund::whereBetween('created_at', [$startDate, $endDate])
+        // Only get refunds for orders within our date range and valid financial statuses
+        $refunds = Refund::whereHas('order', function ($query) use ($startDate, $endDate) {
+            $query->whereBetween('processed_at', [$startDate, $endDate])
+                ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
+        })
             ->with(['refundItems.product'])
             ->get()
             ->flatMap(function ($refund) {
@@ -355,26 +361,43 @@ private function calculateMetrics($startDate, $endDate): array
     // =========== Get daily sales data for the date range ===========
     private function getDailySales($startDate, $endDate): array
     {
-        $orders = Order::whereBetween('created_at', [$startDate, $endDate])
-            ->whereIn('financial_status', ['paid', 'partially_refunded', 'refunded'])
+        $orders = Order::whereBetween('processed_at', [$startDate, $endDate])
+            ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded'])
+            ->get();
+
+        $ordersByDate = $orders->groupBy(function ($order) {
+            return optional($order->processed_at)->format('Y-m-d');
+        });
+
+        $grossByDate = $ordersByDate->map(fn($ordersForDate) => $ordersForDate->sum('subtotal_price'));
+        $discountsByDate = $ordersByDate->map(fn($ordersForDate) => $ordersForDate->sum('total_discounts'));
+
+        $refundsByDate = Refund::whereHas('order', function ($query) use ($startDate, $endDate) {
+            $query->whereBetween('processed_at', [$startDate, $endDate])
+                ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
+        })
+            ->whereBetween('processed_at', [$startDate, $endDate])
             ->get()
-            ->groupBy(function ($order) {
-                return $order->created_at->format('Y-m-d');
+            ->groupBy(function ($refund) {
+                return optional($refund->processed_at)->format('Y-m-d');
             })
-            ->map(function ($orders) {
-                return $orders->sum('subtotal_price') - $orders->sum('total_discounts') - $orders->sum('total_refunds');
+            ->map(function ($refundsForDate) {
+                return $refundsForDate->sum('total_amount');
             });
 
-        // Fill in missing dates with zero sales
         $dailySalesData = [];
         $currentDate = $startDate->copy();
 
         while ($currentDate <= $endDate) {
             $dateKey = $currentDate->format('Y-m-d');
 
+            $gross = (float) ($grossByDate[$dateKey] ?? 0);
+            $discounts = (float) ($discountsByDate[$dateKey] ?? 0);
+            $refunds = (float) ($refundsByDate[$dateKey] ?? 0);
+
             $dailySalesData[] = [
                 'date' => $dateKey,
-                'total' => $orders->has($dateKey) ? (float) $orders[$dateKey] : 0,
+                'total' => $gross - $discounts - $refunds,
             ];
 
             $currentDate->addDay();
@@ -384,14 +407,10 @@ private function calculateMetrics($startDate, $endDate): array
     }
 
 
-
-
-
     // ========== Get order status distribution ==========
-
     private function getOrderStatusDistribution($startDate, $endDate)
     {
-        return Order::whereBetween('created_at', [$startDate, $endDate])
+        return Order::whereBetween('processed_at', [$startDate, $endDate])
             ->get()
             ->groupBy('financial_status')
             ->map(function ($orders, $status) {

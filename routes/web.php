@@ -5,6 +5,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\SyncController;
 use App\Http\Controllers\WebhookController;
+use App\Http\Controllers\ShopifyActionController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', fn () => redirect()->route('dashboard'));
@@ -27,6 +28,12 @@ Route::middleware(['check_auth'])->group(function () {
 
     Route::get('orders', [OrderController::class, 'index'])->name('orders.index');
     Route::get('orders/{order_id}', [OrderController::class, 'show'])->name('orders.show');
+    
+    // Shopify Actions
+    Route::post('orders/{order_id}/fulfill', [ShopifyActionController::class, 'createFulfillment'])->name('shopify.fulfill');
+    Route::post('orders/{order_id}/cancel', [ShopifyActionController::class, 'cancelOrder'])->name('shopify.cancel');
+    Route::post('orders/{order_id}/update-qty', [ShopifyActionController::class, 'updateOrderQuantity'])->name('shopify.update-qty');
+    Route::post('orders/{order_id}/refund', [ShopifyActionController::class, 'createRefund'])->name('shopify.refund');
 
     Route::get('reports', [App\Http\Controllers\ReportController::class, 'index'])->name('reports.index');
 

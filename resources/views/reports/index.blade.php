@@ -47,6 +47,24 @@
     </form>
 </div>
 
+<!-- Date Range Indicator -->
+<div class="mb-4">
+    <p class="text-xs text-gray-500">
+        Showing data for: 
+        <span class="font-medium text-black">
+            @if($range === 'today')
+                Today
+            @elseif($range === '7d')
+                Last 7 days
+            @elseif($range === '30d')
+                Last 30 days
+            @else
+                {{ \Carbon\Carbon::parse($dateStart)->format('M j, Y') }} - {{ \Carbon\Carbon::parse($dateEnd)->format('M j, Y') }}
+            @endif
+        </span>
+    </p>
+</div>
+
 <!-- Metrics Overview -->
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-4 mb-10">
     <!-- Total Revenue -->

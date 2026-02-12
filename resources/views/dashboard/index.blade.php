@@ -56,10 +56,34 @@
 
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
+    <!-- Date Range Indicator -->
+    <div class="mb-4">
+        <p class="text-xs text-gray-500">
+            Showing metrics for: 
+            <span class="font-medium text-black">
+                @if($range === 'today')
+                    Today
+                @elseif($range === '7d')
+                    Last 7 days
+                @elseif($range === '30d')
+                    Last 30 days
+                @else
+                    {{ \Carbon\Carbon::parse($dateStart)->format('M j, Y') }} - {{ \Carbon\Carbon::parse($dateEnd)->format('M j, Y') }}
+                @endif
+            </span>
+        </p>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-10">
         <div class="bg-white border border-gray-200 p-6">
             <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Gross Sales</p>
             <p class="text-3xl font-light text-black">{{ number_format($metrics['total_gross_sales'], 2) }}</p>
+            <p class="text-xs text-gray-400 mt-1">NPR</p>
+        </div>
+
+        <div class="bg-white border border-gray-200 p-6">
+            <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Discounts</p>
+            <p class="text-3xl font-light text-black">-{{ number_format($metrics['total_discounts'] ?? 0, 2) }}</p>
             <p class="text-xs text-gray-400 mt-1">NPR</p>
         </div>
 
@@ -74,8 +98,6 @@
             <p class="text-3xl font-light text-black">{{ number_format($metrics['total_returns'], 2) }}</p>
             <p class="text-xs text-gray-400 mt-1">NPR</p>
         </div>
-
-
     </div>
 
     <div class="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-10">
@@ -161,9 +183,15 @@
             @else
                 <ul class="space-y-3 text-sm">
                     @foreach($newCustomersList as $c)
+                        @php
+                            // First order date in current range, based on order processed_at
+                            $firstOrderInRange = optional(optional($c->orders)->first())->processed_at;
+                        @endphp
                         <li class="flex justify-between items-center pb-3 border-b border-gray-100 last:border-0">
                             <span class="text-gray-700">{{ $c->full_name }}</span>
-                            <span class="text-gray-400 text-xs">{{ $c->created_at->format('M j') }}</span>
+                            <span class="text-gray-400 text-xs">
+                                {{ $firstOrderInRange ? $firstOrderInRange->format('M j') : '' }}
+                            </span>
                         </li>
                     @endforeach
                 </ul>

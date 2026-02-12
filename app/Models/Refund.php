@@ -25,7 +25,7 @@ class Refund extends Model
             'processed_at' => 'datetime',
             'total_amount' => 'decimal:2',
             'total_tax'    => 'decimal:2',
-            'transactions' => 'array', // Store raw JSON of transactions if needed
+            'transactions' => 'array',
         ];
     }
 
@@ -37,5 +37,10 @@ class Refund extends Model
     public function refundItems(): HasMany
     {
         return $this->hasMany(RefundItem::class);
+    }
+
+    public function orderAdjustments(): HasMany
+    {
+        return $this->hasMany(RefundAdjustment::class, 'refund_id');
     }
 }

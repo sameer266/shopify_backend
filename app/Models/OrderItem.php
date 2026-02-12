@@ -16,6 +16,7 @@ class OrderItem extends Model
         'quantity',
         'price',
         'total',
+        'discount_allocation',
         'properties',
         'fulfillment_status',
     ];
@@ -25,6 +26,7 @@ class OrderItem extends Model
         return [
             'price' => 'decimal:2',
             'total' => 'decimal:2',
+            'discount_allocation' => 'decimal:2',
             'properties' => 'array',
         ];
     }

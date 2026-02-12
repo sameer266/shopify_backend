@@ -172,7 +172,9 @@
                    <td class="px-6 py-4 text-sm text-gray-600">{{ $order->orderItems->sum('quantity') }}</td>
 
                     <td class="px-6 py-4 text-sm text-right text-black">{{ number_format($order->total_price, 2) }}</td>
-                    <td class="px-6 py-4 text-sm text-gray-600">{{ $order->created_at->format('M j, Y') }}</td>
+                    <td class="px-6 py-4 text-sm text-gray-600">
+                        {{ optional($order->processed_at)->format('M j, Y') }}
+                    </td>
                    <td class="px-6 py-4 text-sm text-center">
     <a href="{{ route('orders.show', $order) }}" class="text-black hover:text-gray-600 transition">
         <i class="fa fa-eye"></i>
