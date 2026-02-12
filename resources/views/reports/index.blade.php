@@ -186,7 +186,7 @@
 <div class="grid grid-cols-1 gap-10">
     <!-- Product Performance -->
     <div class="space-y-4">
-        <h2 class="text-lg font-medium text-gray-700">Product Category Performance</h2>
+        <h2 class="text-lg font-medium text-gray-700">Product Performance</h2>
         <div class="bg-white border border-gray-200 overflow-hidden">
             <div class="overflow-x-auto">
                 <table id="productTable" class="min-w-full divide-y divide-gray-200 display" style="width:100%">

@@ -5,30 +5,33 @@ namespace App\Http\Controllers;
 use App\Models\Order;
 use App\Models\OrderItem;
 use App\Models\Refund;
+use App\Models\Customer;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class ReportController extends Controller
 {
     public function index(Request $request)
     {
+        // Get date range
         [$startDate, $endDate] = $this->getDateRange($request);
-        
-        // Calculate metrics for current period
+
+        // Current period metrics
         $currentMetrics = $this->calculateMetrics($startDate, $endDate);
-        
-        // Calculate metrics for previous year (same period)
-        $lastYearStartDate = $startDate->copy()->subYear();
-        $lastYearEndDate = $endDate->copy()->subYear();
-        $lastYearMetrics = $this->calculateMetrics($lastYearStartDate, $lastYearEndDate);
+
+        // Previous year metrics (same period last year)
+        $lastYearStart = $startDate->copy()->subYear();
+        $lastYearEnd = $endDate->copy()->subYear();
+        $lastYearMetrics = $this->calculateMetrics($lastYearStart, $lastYearEnd);
 
         // Calculate percentage changes
         $metrics = $this->calculateChanges($currentMetrics, $lastYearMetrics);
 
-        // Product Performance: Revenue, Orders, Quantity
-        $productPerformance = OrderItem::whereHas('order', function ($query) use ($startDate, $endDate) {
-                $query->whereBetween('processed_at', [$startDate, $endDate])
-                      ->whereIn('financial_status', ['paid', 'partially_refunded', 'refunded']);
+        // Product Performance
+        $productPerformance = OrderItem::whereHas('order', function ($q) use ($startDate, $endDate) {
+                $q->whereBetween('processed_at', [$startDate, $endDate])
+                  ->whereIn('financial_status', ['paid', 'partially_refunded', 'refunded']);
             })
             ->select(
                 'title',
@@ -41,7 +44,7 @@ class ReportController extends Controller
             ->limit(100)
             ->get();
 
-        // Customer Performance: Sales, Orders
+        // Customer Performance
         $customerPerformance = Order::whereBetween('processed_at', [$startDate, $endDate])
             ->whereIn('financial_status', ['paid', 'partially_refunded', 'refunded'])
             ->select(
@@ -50,8 +53,8 @@ class ReportController extends Controller
                 DB::raw('SUM(total_price) as total_sales'),
                 DB::raw('COUNT(*) as total_orders')
             )
-            ->groupBy('customer_id', 'email')
             ->with('customer')
+            ->groupBy('customer_id', 'email')
             ->orderByDesc('total_sales')
             ->limit(100)
             ->get();
@@ -69,111 +72,99 @@ class ReportController extends Controller
     protected function getDateRange(Request $request): array
     {
         $range = $request->get('range', '30d');
-        
+
         if ($range === 'today') return [now()->startOfDay(), now()];
-        if ($range === '7d') return [now()->subDays(7)->startOfDay(), now()];
-        if ($range === '30d') return [now()->subDays(30)->startOfDay(), now()];
+        if ($range === '7d') return [now()->subDays(6)->startOfDay(), now()];
+        if ($range === '30d') return [now()->subDays(29)->startOfDay(), now()];
         if ($range === 'custom') {
-            return [
-                \Carbon\Carbon::parse($request->start)->startOfDay(),
-                \Carbon\Carbon::parse($request->end)->endOfDay()
-            ];
+            $start = $request->start ? Carbon::parse($request->start)->startOfDay() : now()->startOfMonth();
+            $end = $request->end ? Carbon::parse($request->end)->endOfDay() : now();
+            return [$start, $end];
         }
-        
-        return [now()->subDays(30)->startOfDay(), now()];
+
+        return [now()->subDays(29)->startOfDay(), now()];
     }
 
     protected function calculateMetrics($startDate, $endDate)
     {
-        // Total Orders (All orders regardless of status, matching Dashboard)
-        $allOrders = Order::whereBetween('processed_at', [$startDate, $endDate]);
-        $totalOrders = $allOrders->count();
+        // Total Transactions (Paid / Partially Refunded / Refunded)
+        $revenueOrdersQuery = Order::whereBetween('processed_at', [$startDate, $endDate])
+            ->whereIn('financial_status', ['paid', 'partially_refunded', 'refunded']);
 
-        // Revenue Orders (Paid/Refunded)
-        $revenueOrders = Order::whereBetween('processed_at', [$startDate, $endDate])
-            ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded'])
-            ->with(['customer', 'refunds.refundItems'])
-            ->get();
-        
-        $grossSales = $revenueOrders->sum('subtotal_price');
-        $discounts = $revenueOrders->sum('total_discounts');
+        $totalTransactions = $revenueOrdersQuery->count();
+
+        // Gross Sales & Discounts
+        $grossSales = (clone $revenueOrdersQuery)->sum('subtotal_price');
+        $totalDiscounts = (clone $revenueOrdersQuery)->sum('total_discounts');
+
+        // Refunds
         $refunds = Refund::whereBetween('processed_at', [$startDate, $endDate])
+            ->whereIn('order_id', $revenueOrdersQuery->pluck('id'))
             ->with('refundItems')
             ->get()
-            ->sum(function ($refund) {
-                return $refund->refundItems->sum('subtotal');
-            });
-        
-        $totalRevenue = $grossSales - $discounts - $refunds;
-        
+            ->sum(fn($r) => $r->refundItems->sum('subtotal'));
+
+        // Total Revenue
+        $totalRevenue = $grossSales - $totalDiscounts - $refunds;
+
+        // Average Order Value
+        $aov = $totalTransactions > 0 ? ($grossSales - $totalDiscounts) / $totalTransactions : 0;
+
         // Customers
-        $customerCount = $revenueOrders->pluck('customer_id')->unique()->filter()->count();
-        $allTimeCustomerCount = \App\Models\Customer::count(); 
-        
-        // New Customers (Created in period)
-        $newCustomersCount = \App\Models\Customer::whereBetween('created_at', [$startDate, $endDate])->count();
+        $customerIds = $revenueOrdersQuery->pluck('customer_id')->filter()->unique();
+        $activeCustomerCount = $customerIds->count();
+        $allTimeCustomerCount = Customer::count();
 
-        // Returning Customers (Active in period + >1 all-time order)
-        // Note: This logic matches DashboardController's getReturningCustomersCount
-        $returningCustomersCount = \App\Models\Customer::whereHas('orders', function ($query) use ($startDate, $endDate) {
-                $query->whereBetween('processed_at', [$startDate, $endDate]);
+        // New Customers (created in this period)
+        $newCustomerIds = Customer::whereBetween('created_at', [$startDate, $endDate])->pluck('id');
+        $newCustomerCount = $newCustomerIds->count();
+
+        // Returning Customers
+        $returningCustomerIds = Customer::whereHas('orders', function ($q) use ($startDate, $endDate) {
+                $q->whereBetween('processed_at', [$startDate, $endDate]);
             })
-            ->withCount('orders')
-            ->having('orders_count', '>', 1)
-            ->count();
+            ->whereHas('orders', function ($q) use ($startDate) {
+                $q->where('processed_at', '<', $startDate);
+            })
+            ->pluck('id');
+        $returningCustomerCount = $returningCustomerIds->count();
 
+        // Revenue splits
+        $newCustomerRevenue = (clone $revenueOrdersQuery)
+            ->whereIn('customer_id', $newCustomerIds)
+            ->sum(DB::raw('subtotal_price - total_discounts'));
 
-        // Revenue Splits (Approximation using user creation date for segmenting revenue)
-        // We stick to the simple logic for Revenue: New = Customer created in range. Returning = Customer created before range.
-        $newCustomerOrders = $revenueOrders->filter(function ($order) use ($startDate, $endDate) {
-            return $order->customer && $order->customer->created_at->between($startDate, $endDate);
-        });
+        $returningCustomerRevenue = (clone $revenueOrdersQuery)
+            ->whereIn('customer_id', $returningCustomerIds)
+            ->sum(DB::raw('subtotal_price - total_discounts'));
 
-        $returningCustomerOrders = $revenueOrders->filter(function ($order) use ($startDate, $endDate) {
-            return $order->customer && $order->customer->created_at->lt($startDate);
-        });
+        // Subtract refunds for accurate revenue
+        $newCustomerRefunds = Refund::whereBetween('processed_at', [$startDate, $endDate])
+            ->whereIn('order_id', (clone $revenueOrdersQuery)->whereIn('customer_id', $newCustomerIds)->pluck('id'))
+            ->with('refundItems')
+            ->get()
+            ->sum(fn($r) => $r->refundItems->sum('subtotal'));
 
-        $newCustomerRefunds = $this->calculateRefundsForOrders($newCustomerOrders, $startDate, $endDate);
-        $newCustomerRevenue = $newCustomerOrders->sum('subtotal_price') 
-                              - $newCustomerOrders->sum('total_discounts') 
-                              - $newCustomerRefunds;
-        
-        $returningCustomerRefunds = $this->calculateRefundsForOrders($returningCustomerOrders, $startDate, $endDate);
-        $returningCustomerRevenue = $returningCustomerOrders->sum('subtotal_price') 
-                                    - $returningCustomerOrders->sum('total_discounts') 
-                                    - $returningCustomerRefunds;
+        $returningCustomerRefunds = Refund::whereBetween('processed_at', [$startDate, $endDate])
+            ->whereIn('order_id', (clone $revenueOrdersQuery)->whereIn('customer_id', $returningCustomerIds)->pluck('id'))
+            ->with('refundItems')
+            ->get()
+            ->sum(fn($r) => $r->refundItems->sum('subtotal'));
+
+        $newCustomerRevenue -= $newCustomerRefunds;
+        $returningCustomerRevenue -= $returningCustomerRefunds;
 
         return [
             'total_revenue' => $totalRevenue,
-            'total_transactions' => $totalOrders, // Using All Orders count
-            'aov' => $revenueOrders->count() > 0 ? ($grossSales - $discounts) / $revenueOrders->count() : 0, // AOV typically based on Paid Orders
+            'total_transactions' => $totalTransactions,
+            'aov' => $aov,
             'all_time_customers' => $allTimeCustomerCount,
-            'customer_count' => $customerCount,
+            'customer_count' => $activeCustomerCount,
             'new_customer_revenue' => $newCustomerRevenue,
             'returning_customer_revenue' => $returningCustomerRevenue,
-            'new_customers' => $newCustomersCount,
-            'returning_customers' => $returningCustomersCount,
+            'new_customers' => $newCustomerCount,
+            'returning_customers' => $returningCustomerCount,
         ];
-    }
-
-    /**
-     * Calculate total refund amount for a given set of orders within a date range.
-     */
-    protected function calculateRefundsForOrders($orders, $startDate, $endDate): float
-    {
-        $orderIds = $orders->pluck('id')->filter()->values();
-
-        if ($orderIds->isEmpty()) {
-            return 0.0;
-        }
-
-        return Refund::whereBetween('processed_at', [$startDate, $endDate])
-            ->whereIn('order_id', $orderIds)
-            ->with('refundItems')
-            ->get()
-            ->sum(function ($refund) {
-                return $refund->refundItems->sum('subtotal');
-            });
     }
 
     protected function calculateChanges($current, $previous)
@@ -182,14 +173,9 @@ class ReportController extends Controller
         foreach ($current as $key => $value) {
             $prevValue = $previous[$key] ?? 0;
             $diff = $value - $prevValue;
-            
-            // Avoid division by zero
-            if ($prevValue == 0) {
-                $percentage = $value > 0 ? 100 : 0;
-            } else {
-                $percentage = ($diff / $prevValue) * 100;
-            }
-            
+
+            $percentage = $prevValue == 0 ? ($value > 0 ? 100 : 0) : ($diff / $prevValue) * 100;
+
             $metrics[$key] = [
                 'value' => $value,
                 'change' => round($percentage, 1)

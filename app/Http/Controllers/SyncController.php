@@ -146,6 +146,8 @@ class SyncController extends Controller
             return;
         }
 
+        // ALWAYS fetch refunds from Shopify when processing webhooks
+        // Webhooks don't include refund data, so we must fetch it separately
         if (empty($orderData['refunds'])) {
             $orderData['refunds'] = $this->fetchOrderRefunds($shopifyOrderId);
         }

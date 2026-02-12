@@ -17,7 +17,7 @@ class ShopifyActionController extends Controller
     }
 
     // ==========================================
-    // 1️⃣ Fulfillment
+    // Fulfillment
     // ==========================================
 
     public function createFulfillment(Request $request, $orderId)
@@ -43,7 +43,7 @@ class ShopifyActionController extends Controller
     }
 
     // ==========================================
-    // 2️⃣ Order Manipulation (GraphQL)
+    //  Order Manipulation (GraphQL)
     // ==========================================
 
     public function cancelOrder(Request $request, $orderId)
@@ -83,7 +83,7 @@ class ShopifyActionController extends Controller
     }
 
     // ==========================================
-    // 3️⃣ Refund (REST)
+    //  Refund (REST)
     // ==========================================
 
     public function createRefund(Request $request, $orderId)

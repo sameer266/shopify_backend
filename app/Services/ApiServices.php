@@ -151,16 +151,17 @@ class ApiServices
     /**
      * Cancel Order (REST API)
      */
-    public function cancelOrder(string $shopifyOrderId)
-    {
-        $payload = [
-            'order' => [
-                'id' => $shopifyOrderId,
-            ]
-        ];
+public function cancelOrder(string $shopifyOrderId)
+{
+    $payload = [
+        'restock' => true,  
+        'email'   => true,  
+        'reason' => 'customer', // optional
+    ];
 
-        return $this->post("orders/{$shopifyOrderId}/cancel.json", $payload);
-    }
+    return $this->post("orders/{$shopifyOrderId}/cancel.json", $payload);
+}
+
 
     /**
      * Update Order Quantity (Order Edit)
@@ -249,10 +250,7 @@ class ApiServices
     /**
      * Create Refund
      * 
-     * @param string $shopifyOrderId
-     * @param array $refundLineItems Array of ['line_item_id' => x, 'quantity' => y, 'restock_type' => 'return']
-     * @param bool $shippingRefund Full shipping refund?
-     * @param float|null $amount Custom amount to refund (if not calculating from items)
+   
      */
     public function createRefund(string $shopifyOrderId, array $refundLineItems = [], bool $shippingRefund = false, ?string $locationId = null)
     {
