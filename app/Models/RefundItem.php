@@ -14,6 +14,7 @@ class RefundItem extends Model
         'product_id',
         'quantity',
         'subtotal',
+        'discount_allocation',
         'total_tax',
         'restock_type',
     ];
@@ -22,6 +23,7 @@ class RefundItem extends Model
     {
         return [
             'subtotal'  => 'decimal:2',
+            'discount_allocation' => 'decimal:2',
             'total_tax' => 'decimal:2',
         ];
     }

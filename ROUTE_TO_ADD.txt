@@ -1,6 +1,0 @@
-# Add this route to your routes/web.php file
-
-// Diagnostic route for checking data integrity
-Route::get('/diagnostic/check-data', [App\Http\Controllers\DiagnosticController::class, 'checkDataIntegrity'])
-    ->middleware('auth')  // Optional: protect with authentication
-    ->name('diagnostic.check-data');

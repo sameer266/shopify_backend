@@ -20,6 +20,7 @@ return new class extends Migration
             $table->string('state')->nullable();
             $table->string('tags')->nullable();
             $table->text('note')->nullable();
+            $table->timestamp('shopify_created_at')->nullable();
             $table->timestamps();
         });
     }

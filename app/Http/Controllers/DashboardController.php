@@ -16,9 +16,9 @@ use Illuminate\Support\Facades\Log;
 
 class DashboardController extends Controller
 {
-    /**
-     * Calculate date range based on request
-     */
+    // =============================
+    //  Calculate date range based on request input
+    // =============================
     protected function getDateRange(Request $request): array
     {
         $range = $request->get('range', '30d');
@@ -121,9 +121,7 @@ class DashboardController extends Controller
 
     // Orders count & average order value
     $orderCount = (clone $ordersQuery)->count();
-    $averageOrderValue = $orderCount > 0
-        ? ($grossSales - $totalDiscounts) / $orderCount
-        : 0;
+  
 
     return [
         'total_orders' => $orderCount,
@@ -131,7 +129,7 @@ class DashboardController extends Controller
         'total_discounts' => round($totalDiscounts, 2),
         'total_returns' => round($totalRefunds, 2),
         'total_net_sales' => round($netSales, 2),
-        'average_order_value' => round($averageOrderValue, 2),
+  
     ];
 }
 
@@ -200,35 +198,25 @@ class DashboardController extends Controller
             ->get();
     }
 
-    /**
-     * Get customers whose first paid order falls within the selected date range.
-     * "New" is defined by order processed_at (Shopify order date), not customer created_at.
-     */
+  
+    // ======== Get new customers who signed up in the date range (based on Shopify created_at) ===========
     private function getNewCustomersByOrderDate($startDate, $endDate)
     {
-        // Customers with at least one paid/partially paid/refunded order in the period
-        $customers = Customer::whereHas('orders', function ($query) use ($startDate, $endDate) {
-            $query->whereBetween('processed_at', [$startDate, $endDate])
-                ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
-        })
-            // And no paid/partially paid/refunded orders before the period start
-            ->whereDoesntHave('orders', function ($query) use ($startDate) {
-                $query->where('processed_at', '<', $startDate)
-                    ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
+        // Get customers who were created in Shopify during the date range
+        // and have at least one paid order
+        $customers = Customer::whereBetween('shopify_created_at', [$startDate, $endDate])
+            ->whereHas('orders', function ($query) {
+                $query->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded']);
             })
-            ->with(['orders' => function ($query) use ($startDate, $endDate) {
-                $query->whereBetween('processed_at', [$startDate, $endDate])
-                    ->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded'])
+            ->with(['orders' => function ($query) {
+                $query->whereIn('financial_status', ['paid', 'partially_paid', 'partially_refunded', 'refunded'])
                     ->orderBy('processed_at');
             }])
+            ->orderByDesc('shopify_created_at')
+            ->take(10)
             ->get();
 
-        // Sort by first order date in the range (most recent first) and limit to 10
-        return $customers->sortByDesc(function ($customer) {
-            return optional($customer->orders->first())->processed_at;
-        })
-            ->take(10)
-            ->values();
+        return $customers;
     }
 
 

@@ -8,9 +8,11 @@ use Illuminate\Support\Facades\Log;
 
 class WebhookController extends Controller
 {
-    /**
-     * Handle incoming webhooks from Shopify
-     */
+   
+
+// ======================
+//   Webhook handling
+// ======================
     protected function handle(Request $request)
     {
         $body   = $request->getContent();
@@ -70,9 +72,10 @@ class WebhookController extends Controller
         return response('OK', 200);
     }
 
-    /**
-     * Handle order deletion webhook
-     */
+  
+    // ======================
+    //   Order deletion handling
+    // ======================
     public function deleteOrder(Request $request)
     {
         $body   = $request->getContent();
@@ -131,33 +134,36 @@ class WebhookController extends Controller
         return response('OK', 200);
     }
 
-    /**
-     * Webhook endpoint for order creation
-     */
+    
+
+    // ======================
+    //   Webhook endpoints Orders Create
+    // ======================
     public function ordersCreate(Request $request)
     {
         return $this->handle($request);
     }
 
-    /**
-     * Webhook endpoint for order updates
-     */
+    // ======================
+    //   Webhook endpoints Orders Update
+    // ======================
     public function ordersUpdate(Request $request)
     {
         return $this->handle($request);
     }
 
-    /**
-     * Webhook endpoint for order cancellation
-     */
+    // ======================
+    //   Webhook endpoints Orders Cancel
+    // ======================
     public function ordersCancel(Request $request)
     {
         return $this->handle($request);
     }
 
-    /**
-     * Webhook endpoint for order deletion
-     */
+ 
+    // ======================
+    //   Webhook endpoints Orders Delete
+    // ======================
     public function orderDelete(Request $request)
     {
         return $this->deleteOrder($request);

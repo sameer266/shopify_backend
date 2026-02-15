@@ -83,7 +83,7 @@
 
         <div class="bg-white border border-gray-200 p-6">
             <p class="text-xs uppercase tracking-wider text-gray-500 mb-2">Discounts</p>
-            <p class="text-3xl font-light text-black">-{{ number_format($metrics['total_discounts'] ?? 0, 2) }}</p>
+            <p class="text-3xl font-light text-black">{{ number_format($metrics['total_discounts'] ?? 0, 2) }}</p>
             <p class="text-xs text-gray-400 mt-1">NPR</p>
         </div>
 
@@ -250,9 +250,6 @@
         </div>
     </div>
 
-    <div class="bg-white border border-gray-200 p-6 mb-6">
-        <p class="text-sm text-gray-600">Average order value: <strong class="text-black ml-2">NPR {{ number_format($metrics['average_order_value'], 2) }}</strong></p>
-    </div>
 
     <div id="sync" class="bg-white border border-gray-200 p-8">
         <h2 class="text-sm uppercase tracking-wider text-gray-500 mb-2">Shopify Sync</h2>

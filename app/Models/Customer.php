@@ -18,6 +18,7 @@ class Customer extends Model
         'state',
         'tags',
         'note',
+        'shopify_created_at',
     ];
 
     protected function casts(): array
@@ -25,6 +26,7 @@ class Customer extends Model
         return [
             'addresses' => 'array',
             'verified_email' => 'boolean',
+            'shopify_created_at' => 'datetime',
         ];
     }
 

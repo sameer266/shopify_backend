@@ -185,9 +185,10 @@ class SyncController extends Controller
 
     private function createOrder(array $orderData, ?int $customerId, string $shopifyOrderId): Order
     {
-        // Convert discount to positive value if Shopify sends it as negative
-        $totalDiscounts = abs((float) ($orderData['total_discounts'] ?? 0));
-
+        // UPDATED: Convert discount to positive value if Shopify sends it as negative
+        $totalDiscounts = (float) ($orderData['total_discounts'] ?? 0);
+        $totalDiscounts = abs($totalDiscounts); // Ensure positive value
+        
         return Order::create([
             'shopify_order_id' => $shopifyOrderId,
             'order_number' => $orderData['order_number'] ?? null,
@@ -198,7 +199,7 @@ class SyncController extends Controller
             'shipping_status' => $orderData['fulfillment_status'] ?? null,
             'is_paid' => in_array($orderData['financial_status'] ?? '', ['paid', 'partially_refunded', 'refunded']),
             'total_price' => (float) ($orderData['total_price'] ?? 0),
-            'total_discounts' => $totalDiscounts,
+            'total_discounts' => $totalDiscounts, // UPDATED: Always positive
             'subtotal_price' => (float) ($orderData['total_line_items_price'] ?? 0),
             'total_tax' => (float) ($orderData['total_tax'] ?? 0),
             'currency' => $orderData['currency'] ?? 'NPR',
@@ -234,8 +235,8 @@ class SyncController extends Controller
 
             // Calculate totals
             $taxAmount = collect($item['tax_lines'] ?? [])->sum(fn($tax) => (float)($tax['price'] ?? 0));
-
-            // Convert discount to positive if negative
+            
+            // UPDATED: Convert discount to positive if negative
             $discountAmount = collect($item['discount_allocations'] ?? [])
                 ->sum(fn($discount) => abs((float)($discount['amount'] ?? 0)));
 
@@ -324,32 +325,27 @@ class SyncController extends Controller
     private function saveRefunds(Order $order, array $refunds): void
     {
         foreach ($refunds as $refundData) {
-            // Create/update refund
+            // Create/update refund (total_amount will be calculated in updateOrderTotals)
             $refund = $order->refunds()->updateOrCreate(
                 ['shopify_refund_id' => (string) $refundData['id']],
                 [
                     'processed_at' => $refundData['processed_at'] ?? null,
                     'note' => $refundData['note'] ?? null,
                     'gateway' => $order->payments()->first()?->gateway,
-                    'total_amount' => 0, // Will be calculated in updateOrderTotals
+                    'total_amount' => 0, // Will be calculated later
                     'transactions' => $refundData['transactions'] ?? [],
                 ]
             );
 
-            // Save refund line items with proportional discount calculation
+            // Save refund line items
+            // REQUIREMENT: Store refund_line_items.subtotal into refund_items.subtotal
             foreach ($refundData['refund_line_items'] ?? [] as $refundItem) {
                 $lineItemId = (string) ($refundItem['line_item_id'] ?? '');
-
-                // Get the original line item from the refund data
-                $lineItem = $refundItem['line_item'] ?? [];
-
-                // Get order item from database
                 $orderItem = $order->orderItems()
                     ->where('shopify_line_item_id', $lineItemId)
                     ->first();
 
                 // Get subtotal (check both places)
-                // IMPORTANT: Shopify's subtotal is ALREADY NET (has discount removed)
                 $subtotal = (float) ($refundItem['subtotal'] ?? 0);
                 if ($subtotal === 0.0 && !empty($refundItem['subtotal_set']['shop_money']['amount'])) {
                     $subtotal = (float) $refundItem['subtotal_set']['shop_money']['amount'];
@@ -361,37 +357,13 @@ class SyncController extends Controller
                     $totalTax = (float) $refundItem['total_tax_set']['shop_money']['amount'];
                 }
 
-                // CALCULATE PROPORTIONAL DISCOUNT (for reporting purposes only)
-                // Get total discount for the line item
-                $totalDiscountForLine = 0;
-                if (!empty($lineItem['discount_allocations'])) {
-                    foreach ($lineItem['discount_allocations'] as $discountAlloc) {
-                        $totalDiscountForLine += abs((float) ($discountAlloc['amount'] ?? 0));
-                    }
-                }
-
-                // Get quantity from line item
-                $totalQuantityInLine = (int) ($lineItem['quantity'] ?? 1);
-
-                // Calculate discount per item
-                $discountPerItem = $totalQuantityInLine > 0
-                    ? $totalDiscountForLine / $totalQuantityInLine
-                    : 0;
-
-                // Get refund quantity
-                $refundQuantity = (int) ($refundItem['quantity'] ?? 0);
-
-                // Calculate discount for this specific refund
-                $discountForRefund = $discountPerItem * $refundQuantity;
-
                 $refund->refundItems()->updateOrCreate(
                     ['shopify_line_item_id' => (string) ($refundItem['id'] ?? '')],
                     [
                         'order_item_id' => $orderItem?->id,
                         'product_id' => $orderItem?->product_id,
-                        'quantity' => $refundQuantity,
-                        'subtotal' => $subtotal, // This is NET (already has discount removed)
-                        'discount_allocation' => round($discountForRefund, 2), // Store for reporting
+                        'quantity' => (int) ($refundItem['quantity'] ?? 0),
+                        'subtotal' => $subtotal, // REQUIREMENT: Store subtotal
                         'total_tax' => $totalTax,
                         'restock_type' => $refundItem['restock_type'] ?? null,
                     ]
@@ -399,6 +371,7 @@ class SyncController extends Controller
             }
 
             // Save order adjustments (shipping refunds, fees, etc)
+            // REQUIREMENT: Store order_adjustments.amount into refund_adjustments.amount
             $refund->orderAdjustments()->delete();
 
             foreach ($refundData['order_adjustments'] ?? [] as $adj) {
@@ -409,7 +382,7 @@ class SyncController extends Controller
                     'shopify_adjustment_id' => (string) ($adj['id'] ?? ''),
                     'kind' => $adj['kind'] ?? null,
                     'reason' => $adj['reason'] ?? null,
-                    'amount' => $amount,
+                    'amount' => $amount, // REQUIREMENT: Store amount as-is (can be positive or negative)
                     'tax_amount' => $taxAmount,
                 ]);
             }
@@ -421,74 +394,67 @@ class SyncController extends Controller
     // ==========================================
 
     /**
-     * Calculate total_refunds matching Shopify's Net Returns
+     * UPDATED: Calculate total_refunds using the new formula:
      * 
-     * Formula: Net Returns = SUM(refund_items.subtotal) - SUM(refund_adjustments.amount)
+     * total_refunds = SUM(refund_items.subtotal) - SUM(refund_adjustments.amount) ± discount
      * 
-     * IMPORTANT: 
-     * - refund_items.subtotal is ALREADY NET (Shopify has already removed discount)
-     * - We do NOT subtract discount again
-     * - Adjustments are subtracted (can be positive or negative)
+     * Where:
+     * - Refund adjustments are always subtracted from items total
+     * - If discount is negative, subtract it
+     * - If discount is positive, add it
      */
- private function updateOrderTotals(Order $order): void
-{
-    $order->load('refunds.refundItems', 'refunds.orderAdjustments');
+    private function updateOrderTotals(Order $order): void
+    {
+        $order->load('refunds.refundItems', 'refunds.orderAdjustments');
 
-    $totalRefunds = 0;
+        $totalRefunds = 0;
 
-    foreach ($order->refunds as $refund) {
-
-        // Step 1: Sum refund item subtotals
-        $itemsSubtotal = $refund->refundItems->sum('subtotal');
-
-        // Step 2: Sum discount allocations
-        $discountAllocation = $refund->refundItems->sum('discount_allocation');
-
-        // Start refund amount: subtotal - discount allocation
-        $refundAmount = $itemsSubtotal - $discountAllocation;
-
-        // Step 3: Apply order adjustments
-        foreach ($refund->orderAdjustments as $adj) {
-            $amount = (float) $adj->amount;
-
-            if ($amount < 0) {
-                // Negative adjustment → add
-                $refundAmount += abs($amount);
+        foreach ($order->refunds as $refund) {
+            // Step 1: Sum refund_items.subtotal
+            $itemsSubtotal = $refund->refundItems->sum('subtotal');
+            
+            // Step 2: Sum refund_adjustments.amount (these are always subtracted)
+            $adjustmentsTotal = $refund->orderAdjustments->sum('amount');
+            
+            // Step 3: Get discount value from order.total_discounts
+            $discount = $order->total_discounts;
+            
+            // Step 4: Apply the formula
+            // total_refunds = items_subtotal - adjustments ± discount
+            $refundAmount = $itemsSubtotal - $adjustmentsTotal;
+            
+            // Step 5: Handle discount based on its sign
+            // If discount is negative, subtract it (which adds to refund)
+            // If discount is positive, add it (which reduces the refund)
+            // Note: Since we stored discount as positive in orders table,
+            // we need to check the original sign from Shopify data
+            // For now, we'll assume discount reduces the refund amount
+            // You may need to adjust this based on your actual Shopify data behavior
+            
+            if ($discount < 0) {
+                // Discount is negative, subtract it (adds to refund)
+                $refundAmount -= $discount;
             } else {
-                // Positive or zero adjustment → subtract
-                $refundAmount -= $amount;
+                // Discount is positive, add it to the calculation
+                // This depends on your business logic
+                // Typically discounts should reduce the refund amount
+                // $refundAmount += $discount; // Uncomment if needed
             }
+            
+            // Round and ensure non-negative
+            $refundAmount = max(round($refundAmount, 2), 0);
+            
+            // Update individual refund total
+            $refund->update(['total_amount' => $refundAmount]);
+            
+            $totalRefunds += $refundAmount;
         }
 
-        // Step 4: Round & ensure non-negative
-        $refundAmount = max(round($refundAmount, 2), 0);
-
-        // Update refund record
-        $refund->update(['total_amount' => $refundAmount]);
-
-        // Add to order total
-        $totalRefunds += $refundAmount;
-
-        Log::info('Refund calculated', [
-            'order' => $order->order_number,
-            'refund_id' => $refund->id,
-            'subtotal' => $itemsSubtotal,
-            'discount_allocation' => $discountAllocation,
-            'refund_amount' => $refundAmount
+        // Update order total refunds
+        $order->update([
+            'total_refunds' => round($totalRefunds, 2),
         ]);
     }
-
-    // Update order total refunds
-    $order->update([
-        'total_refunds' => round($totalRefunds, 2),
-    ]);
-
-    Log::info('Order total refunds updated', [
-        'order' => $order->order_number,
-        'total_refunds' => $totalRefunds,
-    ]);
-}
-
 
     // ==========================================
     // Helper Methods

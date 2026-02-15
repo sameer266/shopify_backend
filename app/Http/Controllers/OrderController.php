@@ -16,58 +16,67 @@ class OrderController extends Controller
         $this->api = $api;
     }
 
-    /**
-     * Display orders list with filters
-     */
+// ======================
+//   List and filter orders
+// ======================   
     public function index(Request $request)
     {
-        $query = Order::with(['customer', 'orderItems']);
+        $query = Order::with(['customer', 'orderItems', 'refunds']);
 
         // Search filter
-        $query->when($request->input('search'), function ($q, $search) {
-            $q->where(function ($sub) use ($search) {
-                $sub->where('order_number', 'like', "%{$search}%")
-                    ->orWhere('shopify_order_id', 'like', "%{$search}%")
-                    ->orWhere('email', 'like', "%{$search}%")
-                    ->orWhereHas('customer', function ($c) use ($search) {
-                        $c->where('first_name', 'like', "%{$search}%")
-                          ->orWhere('last_name', 'like', "%{$search}%")
-                          ->orWhere('email', 'like', "%{$search}%");
-                    });
+        if ($search = $request->input('search')) {
+            $query->where(function ($q) use ($search) {
+                $q->where('order_number', 'like', "%$search%")
+                  ->orWhere('shopify_order_id', 'like', "%$search%")
+                  ->orWhere('email', 'like', "%$search%")
+                  ->orWhereHas('customer', fn($c) => 
+                        $c->where('first_name', 'like', "%$search%")
+                          ->orWhere('last_name', 'like', "%$search%")
+                          ->orWhere('email', 'like', "%$search%")
+                  );
             });
-        });
+        }
 
-        // Payment status filter
-        $query->when($request->input('payment_status'), function ($q, $status) {
-            $q->where('is_paid', $status === 'paid');
-        });
+        // Status filters
+        if ($status = $request->input('payment_status')) {
+            $query->where('is_paid', $status === 'paid');
+        }
+        if ($fulfillment = $request->input('fulfillment_status')) {
+            $query->where('fulfillment_status', $fulfillment);
+        }
+        if ($from = $request->input('date_from')) {
+            $query->whereDate('processed_at', '>=', $from);
+        }
+        if ($to = $request->input('date_to')) {
+            $query->whereDate('processed_at', '<=', $to);
+        }
 
-        // Fulfillment & Shipping filters
-        $query->when($request->input('fulfillment_status'), fn($q, $f) => $q->where('fulfillment_status', $f));
-        $query->when($request->input('shipping_status'), fn($q, $s) => $q->where('shipping_status', $s));
-
-        // Date filters (processed_at)
-        $query->when($request->input('date_from'), fn($q, $from) => $q->whereDate('processed_at', '>=', $from));
-        $query->when($request->input('date_to'), fn($q, $to) => $q->whereDate('processed_at', '<=', $to));
-
-        // Fetch orders (limit 500)
         $orders = $query->orderByDesc('processed_at')->limit(500)->get();
 
-        // Summary
+        // Summary using Report-style revenue calculation
+        $totalRevenue = 0;
+        $totalItems = 0;
+
+        foreach ($orders as $order) {
+            $refunds = $order->refunds->sum('total_amount');
+            $totalRevenue += max($order->subtotal_price - $order->total_discounts - $refunds, 0);
+            $totalItems += $order->orderItems->sum('quantity');
+        }
+
         $summary = [
             'total_orders'  => $orders->count(),
             'total_paid'    => $orders->where('is_paid', true)->count(),
             'total_unpaid'  => $orders->where('is_paid', false)->count(),
-            'total_items'   => $orders->sum(fn($o) => $o->orderItems->sum('quantity')),
-            'total_revenue' => $orders->sum('total_price'),
+            'total_items'   => $totalItems,
+            'total_revenue' => $totalRevenue,
         ];
 
         return view('orders.index', compact('orders', 'summary'));
     }
 
-    /**
-     * Show order details
-     */
+// ======================
+//   Show order details
+// ======================   
     public function show(int $id)
     {
         $order = Order::with([
@@ -81,14 +90,17 @@ class OrderController extends Controller
 
         $totalItems = $order->orderItems->sum('quantity');
 
-        // Fetch Shopify locations for fulfillment
-        $locations = [];
+       
         try {
             $locations = $this->api->getLocations();
         } catch (\Exception $e) {
             Log::error('Failed to fetch locations: ' . $e->getMessage());
         }
 
-        return view('orders.show', compact('order', 'totalItems', 'locations'));
+        // Calculate revenue
+        $refunds = $order->refunds->sum('total_amount');
+        $totalRevenue = max($order->subtotal_price - $order->total_discounts - $refunds, 0);
+
+        return view('orders.show', compact('order', 'totalItems', 'locations', 'totalRevenue'));
     }
 }

@@ -10,291 +10,286 @@ class ApiServices
     private string $domain;
     private string $token;
     private string $version;
+    private string $baseUrl;
 
     public function __construct()
     {
         $this->domain = env('SHOPIFY_STORE_DOMAIN');
         $this->token = env('SHOPIFY_ACCESS_TOKEN');
-        $this->version = env('SHOPIFY_API_VERSION', '2026-01');
+        $this->version = env('SHOPIFY_API_VERSION', '2025-01');
+        $this->baseUrl = "https://{$this->domain}/admin/api/{$this->version}";
     }
 
+    // ==========================================
+    // Core API Methods
+    // ==========================================
+
     /**
-     * Generic REST GET Request
+     * Make a REST GET request
      */
     public function get(string $endpoint, array $params = [])
     {
-        $url = "https://{$this->domain}/admin/api/{$this->version}/{$endpoint}";
-        
-        $response = Http::withHeaders([
-            'X-Shopify-Access-Token' => $this->token,
-            'Content-Type' => 'application/json',
-        ])->get($url, $params);
+        $url = "{$this->baseUrl}/{$endpoint}";
 
-        if ($response->failed()) {
-            Log::error("Shopify REST GET Error: {$endpoint}", ['body' => $response->body()]);
-            throw new \Exception("Shopify API Error: " . $response->json()['errors'] ?? $response->body());
-        }
+        $response = Http::withHeaders($this->getHeaders())
+            ->get($url, $params);
 
-        return $response->json();
+        return $this->handleRestResponse($response, "GET {$endpoint}");
     }
 
     /**
-     * Generic REST POST Request
+     * Make a REST POST request
      */
     public function post(string $endpoint, array $data = [])
     {
-        $url = "https://{$this->domain}/admin/api/{$this->version}/{$endpoint}";
-        
-        $response = Http::withHeaders([
+        $url = "{$this->baseUrl}/{$endpoint}";
+
+        $response = Http::withHeaders($this->getHeaders())
+            ->post($url, $data);
+
+        return $this->handleRestResponse($response, "POST {$endpoint}");
+    }
+
+    /**
+     * Make a GraphQL request
+     */
+    public function graphQL(string $query, array $variables = [])
+    {
+        $url = "{$this->baseUrl}/graphql.json";
+
+        $response = Http::withHeaders($this->getHeaders())
+            ->post($url, [
+                'query' => $query,
+                'variables' => $variables,
+            ]);
+
+        return $this->handleGraphQLResponse($response);
+    }
+
+    // ==========================================
+    // Locations
+    // ==========================================
+
+    public function getLocations()
+    {
+        $response = $this->get('locations.json');
+        return $response['locations'] ?? [];
+    }
+
+    // ==========================================
+    // Fulfillment
+    // ==========================================
+
+    public function createFulfillment(
+        string $shopifyOrderId,
+        ?string $trackingNumber = null,
+        ?string $trackingCompany = null
+    ) {
+        $fulfillmentOrder = $this->getOpenFulfillmentOrder($shopifyOrderId);
+
+        $payload = [
+            'fulfillment' => [
+                'line_items_by_fulfillment_order' => [
+                    ['fulfillment_order_id' => $fulfillmentOrder['id']]
+                ],
+                'notify_customer' => true,
+            ]
+        ];
+
+        // Add tracking info if provided
+        if ($trackingNumber) {
+            $payload['fulfillment']['tracking_info'] = [
+                'number' => $trackingNumber,
+                'company' => $trackingCompany
+            ];
+        }
+
+        return $this->post('fulfillments.json', $payload);
+    }
+
+    // ==========================================
+    // Order Operations
+    // ==========================================
+
+    public function cancelOrder(string $shopifyOrderId)
+    {
+        return $this->post("orders/{$shopifyOrderId}/cancel.json", [
+            'restock' => true,
+        ]);
+    }
+
+    public function updateOrderQuantity(string $shopifyOrderId, string $lineItemId, int $newQuantity)
+    {
+        // Step 1: Begin order edit
+        $calculatedOrderId = $this->beginOrderEdit($shopifyOrderId);
+
+        // Step 2: Update quantity
+        $this->setOrderItemQuantity($calculatedOrderId, $lineItemId, $newQuantity);
+
+        // Step 3: Commit changes
+        return $this->commitOrderEdit($calculatedOrderId);
+    }
+
+    // ==========================================
+    // Refunds
+    // ==========================================
+
+    public function createRefund(
+        string $shopifyOrderId,
+        array $refundLineItems = [],
+        bool $shippingRefund = false,
+        ?string $locationId = null,
+        bool $notifyCustomer = false
+    ) {
+        // Add location to each item for restocking
+        if ($locationId) {
+            $refundLineItems = $this->addLocationToItems($refundLineItems, $locationId);
+        }
+
+        $payload = [
+            'refund' => [
+                'refund_line_items' => $refundLineItems,
+                'notify' => $notifyCustomer,
+            ],
+        ];
+
+        // Add shipping refund if requested
+        if ($shippingRefund) {
+            $payload['refund']['shipping'] = ['full_refund' => true];
+        }
+
+        return $this->post("orders/{$shopifyOrderId}/refunds.json", $payload);
+    }
+
+    // ==========================================
+    // Private Helper Methods
+    // ==========================================
+
+    private function getHeaders(): array
+    {
+        return [
             'X-Shopify-Access-Token' => $this->token,
             'Content-Type' => 'application/json',
-        ])->post($url, $data);
+        ];
+    }
 
+    private function handleRestResponse($response, string $context)
+    {
         if ($response->failed()) {
-            Log::error("Shopify REST POST Error: {$endpoint}", ['body' => $response->body()]);
-            throw new \Exception("Shopify API Error: " . json_encode($response->json()));
+            $error = $response->json()['errors'] ?? $response->body();
+            Log::error("Shopify REST Error: {$context}", ['body' => $response->body()]);
+            throw new \Exception("Shopify API Error: " . (is_array($error) ? json_encode($error) : $error));
         }
 
         return $response->json();
     }
 
-    /**
-     * Generic GraphQL Request
-     */
-    public function graphQL(string $query, array $variables = [])
+    private function handleGraphQLResponse($response)
     {
-        $url = "https://{$this->domain}/admin/api/{$this->version}/graphql.json";
-        
-        $response = Http::withHeaders([
-            'X-Shopify-Access-Token' => $this->token,
-            'Content-Type' => 'application/json',
-        ])->post($url, [
-            'query' => $query,
-            'variables' => $variables,
-        ]);
-
         if ($response->failed()) {
-            Log::error("Shopify GraphQL Error", ['body' => $response->body()]);
+            Log::error('Shopify GraphQL Error', ['body' => $response->body()]);
             throw new \Exception("Shopify GraphQL Error: " . $response->body());
         }
 
         $body = $response->json();
 
         if (isset($body['errors'])) {
-            Log::error("Shopify GraphQL User Error", ['errors' => $body['errors']]);
+            Log::error('Shopify GraphQL User Error', ['errors' => $body['errors']]);
             throw new \Exception("GraphQL Error: " . json_encode($body['errors']));
         }
 
         return $body['data'];
     }
 
-    // ==========================================
-    // 1️⃣ Fulfillment (REST)
-    // ==========================================
-
-    /**
-     * Get all locations (needed for fulfillment)
-     */
-    public function getLocations()
+    private function getOpenFulfillmentOrder(string $shopifyOrderId): array
     {
-        return $this->get('locations.json')['locations'] ?? [];
-    }
-
-    /**
-     * Create Fulfillment for an Order
-     */
-    public function createFulfillment(string $shopifyOrderId, ?string $trackingNumber = null, ?string $trackingCompany = null)
-    {
-        // 1. Get Fulfillment Orders
         $response = $this->get("orders/{$shopifyOrderId}/fulfillment_orders.json");
         $fulfillmentOrders = $response['fulfillment_orders'] ?? [];
-        
-        Log::info("Fulfillment Orders for {$shopifyOrderId}:", $fulfillmentOrders);
 
         if (empty($fulfillmentOrders)) {
-            // Fallback: Try looking for any fulfillment data or throw specific error
-            throw new \Exception("No fulfillment orders returned from Shopify.");
+            throw new \Exception('No fulfillment orders found for this order.');
         }
 
-        // Filter for fulfillable statuses
-        $targetFulfillmentOrder = collect($fulfillmentOrders)->first(function ($fo) {
-            return in_array($fo['status'], ['open', 'in_progress']);
+        // Find first open or in-progress fulfillment order
+        $openOrder = collect($fulfillmentOrders)->first(function ($order) {
+            return in_array($order['status'], ['open', 'in_progress']);
         });
-        
-        if (!$targetFulfillmentOrder) {
-             throw new \Exception("No open or in_progress fulfillment orders found. Statuses: " . collect($fulfillmentOrders)->pluck('status')->implode(', '));
+
+        if (!$openOrder) {
+            $statuses = collect($fulfillmentOrders)->pluck('status')->implode(', ');
+            throw new \Exception("No open fulfillment orders. Current statuses: {$statuses}");
         }
 
-        $fulfillmentPayload = [
-            'fulfillment' => [
-                'line_items_by_fulfillment_order' => [
-                    [
-                        'fulfillment_order_id' => $targetFulfillmentOrder['id'],
-                    ]
-                ],
-                'notify_customer' => true,
-                'tracking_info' => $trackingNumber ? [
-                    'number' => $trackingNumber,
-                    'company' => $trackingCompany
-                ] : null
-            ]
-        ];
-
-        return $this->post("fulfillments.json", $fulfillmentPayload);
+        return $openOrder;
     }
 
-
-    // ==========================================
-    // 2️⃣ Order Manipulation (GraphQL)
-    // ==========================================
-
-    /**
-     * Cancel Order (REST API)
-     */
-public function cancelOrder(string $shopifyOrderId)
-{
-    $payload = [
-        'restock' => true,  
-        'email'   => true,  
-        'reason' => 'customer', // optional
-    ];
-
-    return $this->post("orders/{$shopifyOrderId}/cancel.json", $payload);
-}
-
-
-    /**
-     * Update Order Quantity (Order Edit)
-     */
-    public function updateOrderQuantity(string $shopifyOrderId, string $lineItemId, int $newQuantity)
+    private function beginOrderEdit(string $shopifyOrderId): string
     {
-        // 1. Begin Edit
-        $beginMutation = <<<'GRAPHQL'
+        $data = $this->graphQL('
             mutation orderEditBegin($id: ID!) {
                 orderEditBegin(id: $id) {
-                    calculatedOrder {
-                        id
-                    }
-                    userErrors {
-                        field
-                        message
-                    }
+                    calculatedOrder { id }
+                    userErrors { field message }
                 }
             }
-        GRAPHQL;
+        ', ['id' => "gid://shopify/Order/{$shopifyOrderId}"]);
 
-        $beginData = $this->graphQL($beginMutation, ['id' => "gid://shopify/Order/{$shopifyOrderId}"]);
+        $errors = $data['orderEditBegin']['userErrors'] ?? [];
         
-        if (!empty($beginData['orderEditBegin']['userErrors'])) {
-            throw new \Exception("Edit Begin Error: " . $beginData['orderEditBegin']['userErrors'][0]['message']);
+        if (!empty($errors)) {
+            throw new \Exception("Begin Edit Error: " . $errors[0]['message']);
         }
 
-        $calculatedOrder = $beginData['orderEditBegin']['calculatedOrder'];
-        $calculatedOrderId = $calculatedOrder['id'];
-        
-        // 2. Set Quantity
-        // Use the original Line ID. Shopify will find the calculated line item for it.
-        $setQtyMutation = <<<'GRAPHQL'
-            mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
-                orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
-                    calculatedOrder {
-                        id
-                    }
-                    userErrors {
-                        field
-                        message
-                    }
-                }
-            }
-        GRAPHQL;
-
-        $setQtyData = $this->graphQL($setQtyMutation, [
-            'id' => $calculatedOrderId,
-            'lineItemId' => "gid://shopify/LineItem/{$lineItemId}",
-            'quantity' => $newQuantity
-        ]);
-
-        if (!empty($setQtyData['orderEditSetQuantity']['userErrors'])) {
-            throw new \Exception("Set Quantity Error: " . $setQtyData['orderEditSetQuantity']['userErrors'][0]['message']);
-        }
-
-        // 3. Commit Edit
-        $commitMutation = <<<'GRAPHQL'
-            mutation orderEditCommit($id: ID!) {
-                orderEditCommit(id: $id) {
-                    order {
-                         id
-                    }
-                    userErrors {
-                        field
-                        message
-                    }
-                }
-            }
-        GRAPHQL;
-
-        $commitData = $this->graphQL($commitMutation, ['id' => $calculatedOrderId]);
-
-        if (!empty($commitData['orderEditCommit']['userErrors'])) {
-            throw new \Exception("Commit Error: " . $commitData['orderEditCommit']['userErrors'][0]['message']);
-        }
-
-        return $commitData['orderEditCommit']['order'];
+        return $data['orderEditBegin']['calculatedOrder']['id'];
     }
 
-
-    // ==========================================
-    // 3️⃣ Refund (REST)
-    // ==========================================
-
-    /**
-     * Create Refund
-     * 
-   
-     */
-    public function createRefund(string $shopifyOrderId, array $refundLineItems = [], bool $shippingRefund = false, ?string $locationId = null)
+    private function setOrderItemQuantity(string $calculatedOrderId, string $lineItemId, int $quantity): void
     {
-        // 1. Calculate Refund (Calculates taxes/totals automatically)
-        $calculatePayload = [
-            'refund' => [
-                'shipping' => $shippingRefund ? ['full_refund' => true] : null,
-                'refund_line_items' => array_map(function($item) use ($locationId) {
-                    // Inject location_id if required for restock
-                    if ($locationId && isset($item['restock_type']) && $item['restock_type'] === 'return') {
-                        $item['location_id'] = $locationId;
-                    }
-                    return $item;
-                }, $refundLineItems),
-            ]
-        ];
-
-        // This call is strictly to get the calculated amounts ("transactions" block)
-        $calculated = $this->post("orders/{$shopifyOrderId}/refunds/calculate.json", $calculatePayload);
-        $refundData = $calculated['refund'];
-
-        // 2. Create actual refund using calculated transaction amount
-        // We only care about Kind=refund transactions from the calculation
-        $transactionsToCreate = [];
-        foreach ($refundData['transactions'] as $transaction) {
-            if ($transaction['kind'] === 'refund' || $transaction['kind'] === 'suggested_refund') {
-                $transactionsToCreate[] = [
-                    'parent_id' => $transaction['parent_id'],
-                    'amount' => $transaction['amount'],
-                    'kind' => 'refund',
-                    'gateway' => $transaction['gateway'],
-                ];
+        $data = $this->graphQL('
+            mutation orderEditSetQuantity($id: ID!, $lineItemId: ID!, $quantity: Int!) {
+                orderEditSetQuantity(id: $id, lineItemId: $lineItemId, quantity: $quantity) {
+                    calculatedOrder { id }
+                    userErrors { field message }
+                }
             }
+        ', [
+            'id' => $calculatedOrderId,
+            'lineItemId' => "gid://shopify/LineItem/{$lineItemId}",
+            'quantity' => $quantity
+        ]);
+
+        $errors = $data['orderEditSetQuantity']['userErrors'] ?? [];
+        
+        if (!empty($errors)) {
+            throw new \Exception("Set Quantity Error: " . $errors[0]['message']);
+        }
+    }
+
+    private function commitOrderEdit(string $calculatedOrderId): array
+    {
+        $data = $this->graphQL('
+            mutation orderEditCommit($id: ID!) {
+                orderEditCommit(id: $id) {
+                    order { id }
+                    userErrors { field message }
+                }
+            }
+        ', ['id' => $calculatedOrderId]);
+
+        $errors = $data['orderEditCommit']['userErrors'] ?? [];
+        
+        if (!empty($errors)) {
+            throw new \Exception("Commit Error: " . $errors[0]['message']);
         }
 
-        $finalPayload = [
-            'refund' => [
-                'currency' => $refundData['currency'],
-                'notify_customer' => true,
-                'refund_line_items' => $calculatePayload['refund']['refund_line_items'],
-                'transactions' => $transactionsToCreate,
-            ]
-        ];
-        
-        return $this->post("orders/{$shopifyOrderId}/refunds.json", $finalPayload);
+        return $data['orderEditCommit']['order'];
+    }
+
+    private function addLocationToItems(array $items, string $locationId): array
+    {
+        return array_map(function ($item) use ($locationId) {
+            $item['location_id'] = $locationId;
+            return $item;
+        }, $items);
     }
 }

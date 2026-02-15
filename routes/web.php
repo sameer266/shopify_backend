@@ -34,6 +34,7 @@ Route::middleware(['check_auth'])->group(function () {
     Route::post('orders/{order_id}/cancel', [ShopifyActionController::class, 'cancelOrder'])->name('shopify.cancel');
     Route::post('orders/{order_id}/update-qty', [ShopifyActionController::class, 'updateOrderQuantity'])->name('shopify.update-qty');
     Route::post('orders/{order_id}/refund', [ShopifyActionController::class, 'createRefund'])->name('shopify.refund');
+   
 
     Route::get('reports', [App\Http\Controllers\ReportController::class, 'index'])->name('reports.index');
 

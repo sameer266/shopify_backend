@@ -12,6 +12,7 @@ class OrderItem extends Model
         'product_id',
         'shopify_line_item_id',
         'title',
+        'variant_title',
         'sku',
         'quantity',
         'price',
